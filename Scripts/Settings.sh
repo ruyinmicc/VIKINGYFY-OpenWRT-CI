@@ -41,7 +41,14 @@ echo "CONFIG_PACKAGE_luci-app-$WRT_THEME-config=y" >> ./.config
 
 #手动调整的插件
 if [ -n "$WRT_PACKAGE" ]; then
-	echo -e "$WRT_PACKAGE" >> ./.config
+  # 将字符串按空格分割，循环每个插件名
+  for pkg in $WRT_PACKAGE; do
+    # 跳过空值
+    if [ -n "$pkg" ]; then
+      # 自动添加 CONFIG_PACKAGE_ 前缀和 =y 后缀
+      echo "CONFIG_PACKAGE_$pkg=y" >> ./.config
+    fi
+  done
 fi
 
 #高通平台调整
