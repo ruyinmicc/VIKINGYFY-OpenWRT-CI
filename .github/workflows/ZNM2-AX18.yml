@@ -3,14 +3,15 @@ name: ZNM2-AX18
 
 # CI 计划
 on:
-push:
-    branches: [ main, IPQ60XX-WIFI-YES ]
-  # 自动编译：当 Auto-Clean 运行完成后
+  push:
+     branches: [ main, IPQ60XX-WIFI-YES ]
+    
+#自动编译：当 Auto-Clean 运行完成后
   workflow_run:
     workflows: ["Auto-Clean"]
     types:
       - completed
-  # 手动编译
+# 手动编译
   workflow_dispatch:
     inputs:
       PACKAGE:
