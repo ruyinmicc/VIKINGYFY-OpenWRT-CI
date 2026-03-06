@@ -162,3 +162,9 @@ CONFIG_PACKAGE_gzip=y
 CONFIG_PACKAGE_unzip=y
 CONFIG_PACKAGE_cgroupfs-mount=y
 CONFIG_PACKAGE_kmod-nf-nat=y   
+#5gcpe
+luci-app-modem-data
+luci-app-qmodem
+luci-app-qmodem-sms
+luci-app-qmodem
+
