@@ -33,7 +33,7 @@ jobs:
       matrix:
         CONFIG: [ZNM2-AX18-WIFI]
         SOURCE: [VIKINGYFY/immortalwrt]
-        BRANCH: [main]
+        BRANCH: [IPQ60XX-WIFI-YES]
 
     # 调用公用编译核心 WRT-CORE-LITE.yml
     # 注意：这里引用的文件名必须和你保存的第二个文件名完全一致（不含 .yml 后缀）
