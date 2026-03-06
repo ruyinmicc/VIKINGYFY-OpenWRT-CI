@@ -77,6 +77,11 @@ CONFIG_PACKAGE_xz-utils=y
 CONFIG_PACKAGE_kmod-oaf=y
 CONFIG_PACKAGE_luci-app-appfilter=y
 CONFIG_PACKAGE_luci-app-openappfilter=y
+#常用工具
+CONFIG_PACKAGE_tcpdump=y
+CONFIG_PACKAGE_tcping=y
+CONFIG_PACKAGE_mtr=y
+CONFIG_PACKAGE_iperf3=y
 #固定app
 CONFIG_PACKAGE_luci-app-acl=y
 CONFIG_PACKAGE_luci-app-easytier=y
@@ -91,3 +96,22 @@ CONFIG_PACKAGE_luci-app-accesscontrol=y
 CONFIG_PACKAGE_luci-app-ecm=y
 CONFIG_PACKAGE_luci-app-filetransfer=y
 CONFIG_PACKAGE_luci-app-cpufreq=y
+CONFIG_PACKAGE_luci-app-adguardhome=y
+CONFIG_PACKAGE_luci-app-mosdns=y
+CONFIG_PACKAGE_luci-app-timecontrol=y
+
+# 3. 脚本与运行环境 (必选)
+CONFIG_PACKAGE_bash=y                
+CONFIG_PACKAGE_jq=y                  
+CONFIG_PACKAGE_ipset=y               
+CONFIG_PACKAGE_iptables-mod-tproxy=y  
+CONFIG_PACKAGE_coreutils-nohup=y     
+CONFIG_PACKAGE_coreutils-stat=y       
+CONFIG_PACKAGE_resolveip=y        
+
+# 4. 其他辅助
+CONFIG_PACKAGE_tar=y
+CONFIG_PACKAGE_gzip=y
+CONFIG_PACKAGE_unzip=y
+CONFIG_PACKAGE_cgroupfs-mount=y
+CONFIG_PACKAGE_kmod-nf-nat=y       
