@@ -77,7 +77,7 @@ UPDATE_PACKAGE "vnt" "lmq8267/luci-app-vnt" "main"
 UPDATE_PACKAGE "lucky" "gdy666/luci-app-lucky" "main"
 UPDATE_PACKAGE "luci-app-adguardhome" "kiddin9/op-packages" "main" "pkg"
 UPDATE_PACKAGE "timecontrol" "sirpdboy/luci-app-timecontrol" "main"
-UPDATE_PACKAGE "adguardhome" "immortalWrt/packages" "master" "pkg"
+UPDATE_PACKAGE "adguardhome" "immortalWrt/packages" "openwrt-25.12" "pkg"
 
 #更新软件包版本
 UPDATE_VERSION() {
