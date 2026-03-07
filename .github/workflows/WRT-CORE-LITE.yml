@@ -79,6 +79,10 @@ jobs:
           sudo -E systemctl daemon-reload
           sudo -E timedatectl set-timezone "Asia/Shanghai"
 
+          # 限制 ccache 大小，防止缓存过大
+          export CCACHE_MAXSIZE=5G
+          echo 'export CCACHE_MAXSIZE=5G' >> ~/.bashrc
+
           sudo mkdir -p /mnt/build_wrt
           sudo chown $USER:$USER /mnt/build_wrt
           sudo ln -s /mnt/build_wrt $GITHUB_WORKSPACE/wrt
@@ -88,7 +92,6 @@ jobs:
           echo "WRT_DATE=$(TZ=UTC-8 date +"%y.%m.%d-%H.%M.%S")" >> $GITHUB_ENV
           echo "WRT_MARK=${GITHUB_REPOSITORY%%/*}" >> $GITHUB_ENV
           echo "WRT_INFO=${WRT_SOURCE%%/*}" >> $GITHUB_ENV
-          # 注意：这里引用了 Config 目录，请确保你之前移动文件后，Config 目录确实存在且路径正确
           echo "WRT_TARGET=$(grep -m 1 -oP '^CONFIG_TARGET_\K[\w]+(?=\=y)' ./Config/$WRT_CONFIG.txt)" >> $GITHUB_ENV
           echo "WRT_KVER=none" >> $GITHUB_ENV
           echo "WRT_LIST=none" >> $GITHUB_ENV
@@ -102,41 +105,58 @@ jobs:
             sed -i '/.cn\//d; /tencent/d; /aliyun/d' "$PROJECT_MIRRORS_FILE"
           fi
 
+      # ==============================
+      # 🔥 强化缓存：四大核心缓存全部启用
+      # ==============================
+      - name: Generate Cache Keys
+        id: cache-keys
+        if: env.WRT_TEST != 'true'
+        run: |
+          PKG_HASH=$(echo "${{ inputs.WRT_PACKAGE }}" | md5sum | cut -d' ' -f1)
+          echo "toolchain-key=${{ runner.os }}-toolchain-${{ inputs.WRT_BRANCH }}-${{ env.WRT_HASH }}" >> $GITHUB_OUTPUT
+          echo "dl-key=${{ runner.os }}-dl-${{ inputs.WRT_CONFIG }}-$PKG_HASH" >> $GITHUB_OUTPUT
+          echo "feeds-key=${{ runner.os }}-feeds-${{ hashFiles('Scripts/Packages.sh') }}" >> $GITHUB_OUTPUT
+          echo "ccache-key=${{ runner.os }}-ccache-${{ inputs.WRT_CONFIG }}-$PKG_HASH" >> $GITHUB_OUTPUT
+
+      - name: Cache Toolchain (staging_dir/host)
+        if: env.WRT_TEST != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ./wrt/staging_dir/host
+          key: ${{ steps.cache-keys.outputs.toolchain-key }}
+          restore-keys: |
+            ${{ runner.os }}-toolchain-${{ inputs.WRT_BRANCH }}-
+
+      - name: Cache Downloaded Sources (dl/)
+        if: env.WRT_TEST != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ./wrt/dl
+          key: ${{ steps.cache-keys.outputs.dl-key }}
+          restore-keys: |
+            ${{ runner.os }}-dl-${{ inputs.WRT_CONFIG }}-
+
+      - name: Cache Feeds Directory
+        if: env.WRT_TEST != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ./wrt/feeds
+          key: ${{ steps.cache-keys.outputs.feeds-key }}
+          restore-keys: |
+            ${{ runner.os }}-feeds-
+
+      - name: Cache ccache (C/C++ compile cache)
+        if: env.WRT_TEST != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ./wrt/.ccache
+          key: ${{ steps.cache-keys.outputs.ccache-key }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-${{ inputs.WRT_CONFIG }}-
+
       - name: Check Scripts
         run: |
           find ./ -maxdepth 3 -type f -iregex ".*\(txt\|sh\)$" -exec dos2unix {} \; -exec chmod +x {} \;
-
-      - name: Check Caches
-        id: check-cache
-        if: env.WRT_TEST != 'true'
-        uses: actions/cache@main
-        with:
-          key: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_HASH}}
-          restore-keys: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}
-          path: |
-            ./wrt/.ccache
-            ./wrt/staging_dir/host*
-            ./wrt/staging_dir/tool*
-
-      - name: Update Caches
-        if: env.WRT_TEST != 'true'
-        run: |
-          if [ -d "./wrt/staging_dir" ]; then
-            find "./wrt/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r DIR; do
-              find "$DIR" -type f -exec touch {} +
-            done
-            mkdir -p ./wrt/tmp && echo "1" > ./wrt/tmp/.build
-            echo "toolchain skiped done!"
-          else
-            echo "caches missed!"
-          fi
-          if ${{steps.check-cache.outputs.cache-hit != 'true'}}; then
-            CACHE_LIST=$(gh cache list --key "$WRT_CONFIG-$WRT_INFO" | cut -f 1)
-            for CACHE_KEY in $CACHE_LIST; do
-              gh cache delete $CACHE_KEY
-            done
-            echo "caches cleanup done!"
-          fi
 
       - name: Update Feeds
         run: |
@@ -147,8 +167,6 @@ jobs:
       - name: Custom Packages
         run: |
           cd ./wrt/package/
-          # ⚠️ 重要检查：确保 Scripts 目录路径与你实际移动后的路径一致！
-          # 如果你之前把 Scripts 移到了 Config/Scripts，这里要改为 $GITHUB_WORKSPACE/Config/Scripts/Packages.sh
           $GITHUB_WORKSPACE/Scripts/Packages.sh
           $GITHUB_WORKSPACE/Scripts/Handles.sh
 
@@ -156,14 +174,15 @@ jobs:
         run: |
           cd ./wrt/
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
-            # ⚠️ 重要检查：确保 Config 目录路径正确
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
           else
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL-LITE.txt >> .config
           fi
-          # ⚠️ 重要检查：确保 Scripts 目录路径正确
+          # 👇 关键：启用 ccache
+          echo "CONFIG_CCACHE=y" >> .config
           $GITHUB_WORKSPACE/Scripts/Settings.sh
-          make defconfig -j$(nproc) && make clean -j$(nproc)
+          make defconfig -j$(nproc)
+          # 注意：不再执行 make clean！
 
       - name: Download Packages
         if: env.WRT_TEST != 'true'
