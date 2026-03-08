@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        CONFIG: [ZNM2-AX18-WIFI,IPQ60XX-WIFI-NO]
+        CONFIG: [ZNM2-AX18-WIFI, IPQ60XX-WIFI-NO]
         SOURCE: [VIKINGYFY/immortalwrt]
         BRANCH: [main]
 
