@@ -1,4 +1,3 @@
-#云编译公用核心
 name: WRT-CORE-LITE
 
 on:
@@ -78,7 +77,6 @@ jobs:
           sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo -E systemctl daemon-reload
           sudo -E timedatectl set-timezone "Asia/Shanghai"
-
           sudo mkdir -p /mnt/build_wrt
           sudo chown $USER:$USER /mnt/build_wrt
           sudo ln -s /mnt/build_wrt $GITHUB_WORKSPACE/wrt
@@ -95,10 +93,8 @@ jobs:
       - name: Clone Code
         run: |
           git clone --depth=1 --single-branch --branch $WRT_BRANCH $WRT_REPO ./wrt/
-
-          cd ./wrt/ && echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
-
-          # GitHub Action 移除国内下载源
+          cd ./wrt/
+          echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
           PROJECT_MIRRORS_FILE="./scripts/projectsmirrors.json"
           if [ -f "$PROJECT_MIRRORS_FILE" ]; then
             sed -i '/.cn\//d; /tencent/d; /aliyun/d' "$PROJECT_MIRRORS_FILE"
@@ -127,143 +123,104 @@ jobs:
             find "./wrt/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r DIR; do
               find "$DIR" -type f -exec touch {} +
             done
-
-            mkdir -p ./wrt/tmp && echo "1" > ./wrt/tmp/.build
-
+            mkdir -p ./wrt/tmp
+            echo "1" > ./wrt/tmp/.build
             echo "toolchain skiped done!"
           else
             echo "caches missed!"
           fi
-
           if ${{steps.check-cache.outputs.cache-hit != 'true'}}; then
             CACHE_LIST=$(gh cache list --key "$WRT_CONFIG-$WRT_INFO" | cut -f 1)
             for CACHE_KEY in $CACHE_LIST; do
               gh cache delete $CACHE_KEY
             done
-
             echo "caches cleanup done!"
           fi
 
       - name: Update Feeds
         run: |
           cd ./wrt/
-
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Custom Packages
         run: |
           cd ./wrt/package/
-
           $GITHUB_WORKSPACE/Scripts/Packages.sh
           $GITHUB_WORKSPACE/Scripts/Handles.sh
 
       - name: Custom Settings
         run: |
           cd ./wrt/
-
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
           else
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL-LITE.txt >> .config
           fi
-
           $GITHUB_WORKSPACE/Scripts/Settings.sh
-
           make defconfig -j$(nproc) && make clean -j$(nproc)
 
       - name: Download Packages
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-
           make download -j$(nproc)
 
-      # ---------------------------------------------------------
-      # 🟢 步骤 1: 编译直到“包安装”阶段结束
-      # ---------------------------------------------------------
-      - name: Compile Phase 1: Package Install
+      - name: Compile Phase 1 Package Install
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-          echo "⏳ Starting compilation up to package/install..."
+          echo "Starting compilation up to package/install..."
           make -j$(nproc) package/install || make package/install V=s
-          echo "✅ Phase 1 Complete: All packages installed to staging_dir."
+          echo "Phase 1 Complete."
 
-      # ---------------------------------------------------------
-      # 🟢 步骤 2: 【黄金窗口】替换 Lucky 二进制文件
-      # ---------------------------------------------------------
-      - name: Replace Lucky Binary (Golden Window)
+      - name: Replace Lucky Binary Golden Window
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-          
-          # 1. 动态查找目标 rootfs 目录
-          ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d \( -name "root-qualcommax" -o -name "root-ipq60xx" -o -name "root-mvebu" -o -name "root-mediatek" \) | head -n1)
-          
+          ROOTFS_DIR=""
+          for pattern in "root-qualcommax" "root-ipq60xx" "root-mvebu" "root-mediatek"; do
+            ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d -name "$pattern" | head -n1)
+            if [ -n "$ROOTFS_DIR" ]; then break; fi
+          done
           if [ -z "$ROOTFS_DIR" ]; then
             ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d -name "root-*" | grep -v "host" | head -n1)
           fi
-
           if [ -z "$ROOTFS_DIR" ]; then
-            echo "❌ ERROR: Cannot find target rootfs directory in staging_dir!"
+            echo "ERROR: Cannot find target rootfs directory!"
             ls -la staging_dir/
             exit 1
           fi
-          
-          echo "🎯 Target RootFS Directory: $ROOTFS_DIR"
-
-          # 2. 定义源文件路径
+          echo "Target RootFS: $ROOTFS_DIR"
           ARCH_DIR="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53"
-          
-          # 3. 验证源文件
           if [ ! -f "$ARCH_DIR/lucky" ]; then
-            echo "❌ ERROR: Custom lucky binary not found at: $ARCH_DIR/lucky"
-            ls -la "$ARCH_DIR" || echo "Directory does not exist"
+            echo "ERROR: Custom lucky binary not found at: $ARCH_DIR/lucky"
             exit 1
           fi
-          echo "📦 Found custom binary: $ARCH_DIR/lucky"
-
-          # 4. 替换文件
           mkdir -p "$ROOTFS_DIR/usr/bin"
           mkdir -p "$ROOTFS_DIR/etc/init.d"
-          
           cp -f "$ARCH_DIR/lucky" "$ROOTFS_DIR/usr/bin/lucky"
           chmod +x "$ROOTFS_DIR/usr/bin/lucky"
-          echo "✅ Replaced /usr/bin/lucky"
-          
+          echo "Replaced /usr/bin/lucky"
           if [ -f "$ARCH_DIR/lucky.init" ]; then
             cp -f "$ARCH_DIR/lucky.init" "$ROOTFS_DIR/etc/init.d/lucky"
             chmod +x "$ROOTFS_DIR/etc/init.d/lucky"
-            echo "✅ Replaced /etc/init.d/lucky"
-          else
-            echo "⚠️ No custom init script found, skipping."
+            echo "Replaced /etc/init.d/lucky"
           fi
-          
-          # 5. 验证
-          echo "--- Verification ---"
+          echo "Verification:"
           ls -l "$ROOTFS_DIR/usr/bin/lucky"
           file "$ROOTFS_DIR/usr/bin/lucky"
-          echo "---------------------"
-          echo "✅ Replacement successful. Ready for image packing."
 
-      # ---------------------------------------------------------
-      # 🟢 步骤 3: 继续编译，执行“镜像打包”阶段 (已修复语法)
-      # ---------------------------------------------------------
-      - name: Compile Phase 2: Build Images
+      - name: Compile Phase 2 Build Images
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-          echo "⏳ Starting image packaging..."
-          
-          # 执行镜像打包
+          echo "Starting image packaging..."
           make -j$(nproc) image/install || make image/install V=s
-          
-          echo "✅ Phase 2 Complete: Firmware images generated with custom lucky."
-          
-          # 检查生成的文件 (使用引号包裹复杂命令以防解析错误)
-          echo "--- Generated Files ---"
-          find bin/targets/ -type f \( -name "*.bin" -o -name "*.itb" -o -name "*.img.gz" \) | head -10
+          echo "Phase 2 Complete."
+          echo "Generated Files:"
+          find bin/targets/ -type f -name "*.bin" | head -5
+          find bin/targets/ -type f -name "*.itb" | head -5
 
       - name: Machine Information
         run: |
@@ -274,29 +231,23 @@ jobs:
           df -h
           echo "======================="
           du -h --max-depth=1
-          echo "======================="
 
       - name: Package Firmware
         run: |
-          cd ./wrt/ && mkdir ./upload/
-
+          cd ./wrt/
+          mkdir ./upload/
           cp -f ./.config ./upload/Config-"$WRT_CONFIG"-"$WRT_INFO"-"$WRT_BRANCH"-"$WRT_DATE".txt
-
           if [[ $WRT_TEST != 'true' ]]; then
-            echo "WRT_KVER=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^kernel - \K[\d\.]+' {} \;)" >> $GITHUB_ENV
-            echo "WRT_LIST=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
-
+            echo "WRT_KVER=$(find ./bin/targets/ -type f -name '*.manifest' -exec grep -oP '^kernel - \K[\d\.]+' {} \;)" >> $GITHUB_ENV
+            echo "WRT_LIST=$(find ./bin/targets/ -type f -name '*.manifest' -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
             find ./bin/targets/ -iregex ".*\(buildinfo\|json\|sha256sums\|packages\)$" -exec rm -rf {} +
-
-            for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
-              EXT=$(basename $FILE | cut -d '.' -f 2-)
-              NAME=$(basename $FILE | cut -d '.' -f 1 | grep -io "\($WRT_TARGET\).*")
+            for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*"); do
+              EXT=$(basename "$FILE" | cut -d '.' -f 2-)
+              NAME=$(basename "$FILE" | cut -d '.' -f 1 | grep -io "\($WRT_TARGET\).*")
               NEW_FILE="$WRT_INFO"-"$WRT_BRANCH"-"$NAME"-"$WRT_DATE"."$EXT"
-              mv -f $FILE ./upload/$NEW_FILE
+              mv -f "$FILE" ./upload/"$NEW_FILE"
             done
-
             find ./bin/targets/ -type f -exec mv -f {} ./upload/ \;
-
             make clean -j$(nproc)
           fi
 
@@ -308,25 +259,14 @@ jobs:
           body: |
             这是个平台固件包，内含多个设备！
             请注意选择你需要的设备固件！
-            不要问，刷就完事了！
-
-            全系带开源硬件加速，别问了！
-
+            
             源码：${{env.WRT_REPO}}
             分支：${{env.WRT_BRANCH}}
             提交：${{env.WRT_HASH}}
-
-            配置：${{env.WRT_CONFIG}}
-            平台：${{env.WRT_TARGET}}
-
+            
             登录地址：${{env.WRT_IP}}
             登录密码：${{env.WRT_PW}}
-
             WIFI名称：${{env.WRT_SSID}}
             WIFI密码：${{env.WRT_WORD}}
-
-            内核版本：${{env.WRT_KVER}}
-            插件列表：${{env.WRT_LIST}}
             
-            ---
-            **自定义说明**: 已注入定制版 Lucky 二进制文件 (aarch64_cortex-a53)
+            **自定义说明**: 已注入定制版 Lucky 二进制文件
