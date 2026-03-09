@@ -194,7 +194,7 @@ jobs:
     
           # 配置需要替换的二进制文件
           declare -A BINARIES=(
-           ["curl"]="$GITHUB_WORKSPACE/custom-bin/curl"
+           ["lucky"]="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53/lucky"
            # 可以添加更多需要替换的二进制文件
            # ["wget"]="$GITHUB_WORKSPACE/custom-bin/wget"
            )
