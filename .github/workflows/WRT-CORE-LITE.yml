@@ -165,26 +165,7 @@ jobs:
         run: |
           cd ./wrt/
           make download -j$(nproc)
-          
-      # ---------------------------------------------------------
-      # 🟢 新增步骤：生成 APK 签名密钥 (修复 private-key.pem 缺失错误)
-      # ---------------------------------------------------------
-      - name: Generate APK Signing Key
-        if: env.WRT_TEST != 'true'
-        run: |
-          cd ./wrt/
-          # 检查密钥是否存在，不存在则生成
-          if [ ! -f "private-key.pem" ]; then
-            echo "🔑 Generating missing APK signing key..."
-            # 使用 openssl 生成 RSA 私钥
-            openssl genrsa -out private-key.pem 2048
-            # 设置权限
-            chmod 600 private-key.pem
-            echo "✅ Key generated successfully."
-          else
-            echo "✅ Signing key already exists, skipping generation."
-          fi
-          
+
       # ---------------------------------------------------------
       # 🟢 步骤 1: 编译直到“包安装”阶段结束
       # ---------------------------------------------------------
