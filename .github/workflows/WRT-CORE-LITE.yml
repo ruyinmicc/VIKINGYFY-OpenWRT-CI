@@ -88,7 +88,6 @@ jobs:
           echo "WRT_DATE=$(TZ=UTC-8 date +"%y.%m.%d-%H.%M.%S")" >> $GITHUB_ENV
           echo "WRT_MARK=${GITHUB_REPOSITORY%%/*}" >> $GITHUB_ENV
           echo "WRT_INFO=${WRT_SOURCE%%/*}" >> $GITHUB_ENV
-          # 注意：这里引用了 Config 目录，请确保你之前移动文件后，Config 目录确实存在且路径正确
           echo "WRT_TARGET=$(grep -m 1 -oP '^CONFIG_TARGET_\K[\w]+(?=\=y)' ./Config/$WRT_CONFIG.txt)" >> $GITHUB_ENV
           echo "WRT_KVER=none" >> $GITHUB_ENV
           echo "WRT_LIST=none" >> $GITHUB_ENV
@@ -147,8 +146,6 @@ jobs:
       - name: Custom Packages
         run: |
           cd ./wrt/package/
-          # ⚠️ 重要检查：确保 Scripts 目录路径与你实际移动后的路径一致！
-          # 如果你之前把 Scripts 移到了 Config/Scripts，这里要改为 $GITHUB_WORKSPACE/Config/Scripts/Packages.sh
           $GITHUB_WORKSPACE/Scripts/Packages.sh
           $GITHUB_WORKSPACE/Scripts/Handles.sh
 
@@ -156,12 +153,10 @@ jobs:
         run: |
           cd ./wrt/
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
-            # ⚠️ 重要检查：确保 Config 目录路径正确
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
           else
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL-LITE.txt >> .config
           fi
-          # ⚠️ 重要检查：确保 Scripts 目录路径正确
           $GITHUB_WORKSPACE/Scripts/Settings.sh
           make defconfig -j$(nproc) && make clean -j$(nproc)
 
@@ -171,11 +166,79 @@ jobs:
           cd ./wrt/
           make download -j$(nproc)
 
-      - name: Compile Firmware
+      # ---------------------------------------------------------
+      # 🟢 步骤 1: 编译直到“包安装”阶段结束
+      # ---------------------------------------------------------
+      - name: Compile Phase 1 Package Install
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-          make -j$(nproc) || make -j1 V=s
+          echo "⏳ Starting compilation up to package/install..."
+          make -j$(nproc) package/install || make package/install V=s
+          echo "✅ Phase 1 Complete: Packages installed."
+
+      # ---------------------------------------------------------
+      # 🟢 步骤 2: 【黄金窗口】替换 Lucky 二进制文件
+      # ---------------------------------------------------------
+      - name: Replace Lucky Binary Golden Window
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          
+          # 1. 查找目标 rootfs 目录 (自动适配多种架构)
+          ROOTFS_DIR=""
+          for pattern in "root-qualcommax" "root-ipq60xx" "root-mvebu" "root-mediatek" "root-x86-64"; do
+            ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d -name "$pattern" 2>/dev/null | head -n1)
+            if [ -n "$ROOTFS_DIR" ]; then break; fi
+          done
+          
+          # 如果特定架构没找到，尝试通用匹配
+          if [ -z "$ROOTFS_DIR" ]; then
+            ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d -name "root-*" | grep -v "host" | head -n1)
+          fi
+
+          if [ -z "$ROOTFS_DIR" ]; then
+            echo "❌ ERROR: Cannot find target rootfs directory!"
+            ls -la staging_dir/
+            exit 1
+          fi
+          echo "🎯 Target RootFS: $ROOTFS_DIR"
+
+          # 2. 定义源文件路径 (请确保仓库根目录有 Custom/lucky/aarch64_cortex-a53)
+          ARCH_DIR="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53"
+          
+          # 3. 验证并替换
+          if [ ! -f "$ARCH_DIR/lucky" ]; then
+            echo "❌ ERROR: Binary not found at $ARCH_DIR/lucky"
+            exit 1
+          fi
+          
+          mkdir -p "$ROOTFS_DIR/usr/bin"
+          mkdir -p "$ROOTFS_DIR/etc/init.d"
+          
+          cp -f "$ARCH_DIR/lucky" "$ROOTFS_DIR/usr/bin/lucky"
+          chmod +x "$ROOTFS_DIR/usr/bin/lucky"
+          echo "✅ Replaced /usr/bin/lucky"
+          
+          if [ -f "$ARCH_DIR/lucky.init" ]; then
+            cp -f "$ARCH_DIR/lucky.init" "$ROOTFS_DIR/etc/init.d/lucky"
+            chmod +x "$ROOTFS_DIR/etc/init.d/lucky"
+            echo "✅ Replaced /etc/init.d/lucky"
+          fi
+          
+          echo "Verification:"
+          file "$ROOTFS_DIR/usr/bin/lucky"
+
+      # ---------------------------------------------------------
+      # 🟢 步骤 3: 继续编译，打包镜像
+      # ---------------------------------------------------------
+      - name: Compile Phase 2 Build Images
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          echo "⏳ Starting image packaging..."
+          make -j$(nproc) image/install || make image/install V=s
+          echo "✅ Phase 2 Complete: Images generated."
 
       - name: Machine Information
         run: |
@@ -193,8 +256,8 @@ jobs:
           cd ./wrt/ && mkdir ./upload/
           cp -f ./.config ./upload/Config-"$WRT_CONFIG"-"$WRT_INFO"-"$WRT_BRANCH"-"$WRT_DATE".txt
           if [[ $WRT_TEST != 'true' ]]; then
-            echo "WRT_KVER=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^kernel - \K[\d\.]+' {} \;)" >> $GITHUB_ENV
-            echo "WRT_LIST=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
+            echo "WRT_KVER=$(find ./bin/targets/ -type f -name '*.manifest' -exec grep -oP '^kernel - \K[\d\.]+' {} \;)" >> $GITHUB_ENV
+            echo "WRT_LIST=$(find ./bin/targets/ -type f -name '*.manifest' -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
             find ./bin/targets/ -iregex ".*\(buildinfo\|json\|sha256sums\|packages\)$" -exec rm -rf {} +
             for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
               EXT=$(basename $FILE | cut -d '.' -f 2-)
@@ -216,14 +279,21 @@ jobs:
             请注意选择你需要的设备固件！
             不要问，刷就完事了！
             全系带开源硬件加速，别问了！
+            
             源码：${{env.WRT_REPO}}
             分支：${{env.WRT_BRANCH}}
             提交：${{env.WRT_HASH}}
+            
             配置：${{env.WRT_CONFIG}}
             平台：${{env.WRT_TARGET}}
+            
             登录地址：${{env.WRT_IP}}
             登录密码：${{env.WRT_PW}}
             WIFI 名称：${{env.WRT_SSID}}
             WIFI 密码：${{env.WRT_WORD}}
+            
             内核版本：${{env.WRT_KVER}}
             插件列表：${{env.WRT_LIST}}
+            
+            ---
+            **注**: 已注入定制版 Lucky 二进制文件
