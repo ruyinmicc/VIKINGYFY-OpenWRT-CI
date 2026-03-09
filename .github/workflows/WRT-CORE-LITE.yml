@@ -180,7 +180,7 @@ jobs:
           make download -j$(nproc)
 
       # ---------------------------------------------------------
-      # 步骤 1: 编译直到“包安装”阶段结束
+      # 🟢 步骤 1: 编译直到“包安装”阶段结束
       # 此时所有软件包已解压到 staging_dir，但尚未打包成固件镜像
       # ---------------------------------------------------------
       - name: Compile Phase 1: Package Install
@@ -196,7 +196,7 @@ jobs:
           echo "✅ Phase 1 Complete: All packages installed to staging_dir."
 
       # ---------------------------------------------------------
-      # 步骤 2: 【黄金窗口】替换 Lucky 二进制文件
+      # 🟢 步骤 2: 【黄金窗口】替换 Lucky 二进制文件
       # 直接操作 staging_dir 中的 rootfs 目录，这是即将被打包的源
       # ---------------------------------------------------------
       - name: Replace Lucky Binary (Golden Window)
@@ -205,8 +205,8 @@ jobs:
           cd ./wrt/
           
           # 1. 动态查找目标 rootfs 目录
-          # IPQ60xx 通常对应 root-qualcommax 或 root-ipq60xx
-          ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d \( -name "root-qualcommax" -o -name "root-ipq60xx" -o -name "root-mvebu" \) | head -n1)
+          # IPQ60xx 通常对应 root-qualcommax 或 root-ipq60xx，同时也兼容其他架构
+          ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d \( -name "root-qualcommax" -o -name "root-ipq60xx" -o -name "root-mvebu" -o -name "root-mediatek" \) | head -n1)
           
           # 如果没找到特定架构名，尝试通用匹配 (排除 host 目录)
           if [ -z "$ROOTFS_DIR" ]; then
@@ -223,11 +223,14 @@ jobs:
           echo "🎯 Target RootFS Directory: $ROOTFS_DIR"
 
           # 2. 定义源文件路径 (基于你的仓库结构)
+          # ⚠️ 请确保你的仓库根目录下有 Custom/lucky/aarch64_cortex-a53 目录
           ARCH_DIR="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53"
           
           # 3. 验证源文件是否存在
           if [ ! -f "$ARCH_DIR/lucky" ]; then
             echo "❌ ERROR: Custom lucky binary not found at: $ARCH_DIR/lucky"
+            echo "Checking directory contents:"
+            ls -la "$ARCH_DIR" || echo "Directory does not exist"
             exit 1
           fi
           echo "📦 Found custom binary: $ARCH_DIR/lucky"
@@ -258,7 +261,7 @@ jobs:
           echo "✅ Replacement successful. Ready for image packing."
 
       # ---------------------------------------------------------
-      # 步骤 3: 继续编译，执行“镜像打包”阶段
+      # 🟢 步骤 3: 继续编译，执行“镜像打包”阶段
       # 这将读取刚才修改过的 staging_dir 并生成最终的 .bin/.itb 文件
       # ---------------------------------------------------------
       - name: Compile Phase 2: Build Images
@@ -274,8 +277,7 @@ jobs:
           
           # 简单检查生成的文件
           echo "--- Generated Files ---"
-          find bin/targets/ -type f -name "*.bin" -o -name "*.itb" | head -10
-          
+          find bin/targets/ -type f \( -name "*.bin" -o -name "*.itb" -o -name "*.img.gz" \) | head -10
           
       - name: Machine Information
         run: |
@@ -340,3 +342,6 @@ jobs:
 
             内核版本：${{env.WRT_KVER}}
             插件列表：${{env.WRT_LIST}}
+            
+            ---
+            **自定义说明**: 已注入定制版 Lucky 二进制文件 (aarch64_cortex-a53)
