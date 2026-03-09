@@ -74,11 +74,10 @@ jobs:
           sudo -E apt -yqq autoremove --purge
           sudo -E apt -yqq autoclean
           sudo -E apt -yqq clean
-          sudo -E apt -yqq install dos2unix python3-netifaces libfuse-dev
+          sudo -E apt -yqq install dos2unix python3-netifaces libfuse-dev openssl
           sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo -E systemctl daemon-reload
           sudo -E timedatectl set-timezone "Asia/Shanghai"
-
           sudo mkdir -p /mnt/build_wrt
           sudo chown $USER:$USER /mnt/build_wrt
           sudo ln -s /mnt/build_wrt $GITHUB_WORKSPACE/wrt
@@ -167,6 +166,27 @@ jobs:
           make download -j$(nproc)
 
       # ---------------------------------------------------------
+      # 🟢 【关键修复】强制生成签名密钥 (无条件执行)
+      # ---------------------------------------------------------
+      - name: Force Generate APK Signing Key
+        run: |
+          cd ./wrt/
+          echo "🔑 Forcing generation of APK signing key..."
+          # 无论是否存在，都重新生成以确保权限和内容正确
+          rm -f private-key.pem
+          openssl genrsa -out private-key.pem 2048
+          chmod 600 private-key.pem
+          
+          # 验证生成结果
+          if [ -f "private-key.pem" ]; then
+            echo "✅ Key generated successfully at $(pwd)/private-key.pem"
+            ls -l private-key.pem
+          else
+            echo "❌ ERROR: Failed to generate key!"
+            exit 1
+          fi
+
+      # ---------------------------------------------------------
       # 🟢 步骤 1: 编译直到“包安装”阶段结束
       # ---------------------------------------------------------
       - name: Compile Phase 1 Package Install
@@ -174,6 +194,11 @@ jobs:
         run: |
           cd ./wrt/
           echo "⏳ Starting compilation up to package/install..."
+          # 再次确认密钥存在
+          if [ ! -f "private-key.pem" ]; then
+             echo "❌ CRITICAL: Key missing before compile! Aborting."
+             exit 1
+          fi
           make -j$(nproc) package/install || make package/install V=s
           echo "✅ Phase 1 Complete: Packages installed."
 
@@ -184,19 +209,14 @@ jobs:
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-          
-          # 1. 查找目标 rootfs 目录 (自动适配多种架构)
           ROOTFS_DIR=""
           for pattern in "root-qualcommax" "root-ipq60xx" "root-mvebu" "root-mediatek" "root-x86-64"; do
             ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d -name "$pattern" 2>/dev/null | head -n1)
             if [ -n "$ROOTFS_DIR" ]; then break; fi
           done
-          
-          # 如果特定架构没找到，尝试通用匹配
           if [ -z "$ROOTFS_DIR" ]; then
             ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d -name "root-*" | grep -v "host" | head -n1)
           fi
-
           if [ -z "$ROOTFS_DIR" ]; then
             echo "❌ ERROR: Cannot find target rootfs directory!"
             ls -la staging_dir/
@@ -204,10 +224,7 @@ jobs:
           fi
           echo "🎯 Target RootFS: $ROOTFS_DIR"
 
-          # 2. 定义源文件路径 (请确保仓库根目录有 Custom/lucky/aarch64_cortex-a53)
           ARCH_DIR="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53"
-          
-          # 3. 验证并替换
           if [ ! -f "$ARCH_DIR/lucky" ]; then
             echo "❌ ERROR: Binary not found at $ARCH_DIR/lucky"
             exit 1
@@ -215,7 +232,6 @@ jobs:
           
           mkdir -p "$ROOTFS_DIR/usr/bin"
           mkdir -p "$ROOTFS_DIR/etc/init.d"
-          
           cp -f "$ARCH_DIR/lucky" "$ROOTFS_DIR/usr/bin/lucky"
           chmod +x "$ROOTFS_DIR/usr/bin/lucky"
           echo "✅ Replaced /usr/bin/lucky"
@@ -225,8 +241,6 @@ jobs:
             chmod +x "$ROOTFS_DIR/etc/init.d/lucky"
             echo "✅ Replaced /etc/init.d/lucky"
           fi
-          
-          echo "Verification:"
           file "$ROOTFS_DIR/usr/bin/lucky"
 
       # ---------------------------------------------------------
@@ -296,4 +310,4 @@ jobs:
             插件列表：${{env.WRT_LIST}}
             
             ---
-            **注**: 已注入定制版 Lucky 二进制文件
+            **注**: 已注入定制版 Lucky 二进制文件 (已强制修复 APK 签名密钥)
