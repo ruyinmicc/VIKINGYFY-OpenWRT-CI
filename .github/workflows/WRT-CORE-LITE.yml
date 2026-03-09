@@ -166,44 +166,62 @@ jobs:
           make download -j$(nproc)
 
       # ---------------------------------------------------------
-      # 🟢 【关键修复】强制生成签名密钥 (无条件执行)
+      # 🟢 步骤 0: 强制生成签名密钥 (无条件)
       # ---------------------------------------------------------
       - name: Force Generate APK Signing Key
         run: |
           cd ./wrt/
-          echo "🔑 Forcing generation of APK signing key..."
-          # 无论是否存在，都重新生成以确保权限和内容正确
+          echo "🔑 Generating APK signing key..."
           rm -f private-key.pem
           openssl genrsa -out private-key.pem 2048
           chmod 600 private-key.pem
-          
-          # 验证生成结果
-          if [ -f "private-key.pem" ]; then
-            echo "✅ Key generated successfully at $(pwd)/private-key.pem"
-            ls -l private-key.pem
-          else
-            echo "❌ ERROR: Failed to generate key!"
-            exit 1
-          fi
+          ls -l private-key.pem
 
       # ---------------------------------------------------------
-      # 🟢 步骤 1: 编译直到“包安装”阶段结束
+      # 🟢 步骤 1: 编译目标系统和所有包 (但不进行最后的索引和镜像打包)
+      # 使用 'make -j$(nproc)' 但通过 'world' 的子集来控制
+      # 实际上，为了稳定，我们分三步走：
+      # 1. target/install (内核等)
+      # 2. package/compile (编译所有包生成 .apk)
+      # 3. package/install (安装包并生成索引) <- 之前报错就在这，现在确保前面已完成
       # ---------------------------------------------------------
-      - name: Compile Phase 1 Package Install
+      
+      - name: Compile Phase 1 - Target & Packages
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-          echo "⏳ Starting compilation up to package/install..."
-          # 再次确认密钥存在
-          if [ ! -f "private-key.pem" ]; then
-             echo "❌ CRITICAL: Key missing before compile! Aborting."
-             exit 1
+          echo "⏳ Compiling target and packages..."
+          # 先编译目标文件 (内核等)
+          make -j$(nproc) target/install || make target/install V=s
+          # 再编译所有包 (生成 .apk 文件到 staging_dir)
+          make -j$(nproc) package/compile || make package/compile V=s
+          
+          # 检查是否有 .apk 文件生成
+          APK_COUNT=$(find staging_dir/packages/ -name "*.apk" | wc -l)
+          echo "📦 Found $APK_COUNT .apk files in staging_dir."
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "⚠️ Warning: No .apk files found. Checking logs..."
+            ls -R staging_dir/packages/ | head -n 20
           fi
-          make -j$(nproc) package/install || make package/install V=s
-          echo "✅ Phase 1 Complete: Packages installed."
 
       # ---------------------------------------------------------
-      # 🟢 步骤 2: 【黄金窗口】替换 Lucky 二进制文件
+      # 🟢 步骤 2: 安装包 (生成索引) -> 此时应该有 .apk 了
+      # ---------------------------------------------------------
+      - name: Compile Phase 2 - Package Install & Index
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          echo "⏳ Installing packages and creating index..."
+          # 再次确认密钥
+          if [ ! -f "private-key.pem" ]; then exit 1; fi
+          
+          # 执行安装和索引
+          make -j$(nproc) package/install || make package/install V=s
+          echo "✅ Packages installed and indexed."
+
+      # ---------------------------------------------------------
+      # 🟢 步骤 3: 【黄金窗口】替换 Lucky 二进制文件
+      # 此时包已安装进 rootfs，但镜像未打包
       # ---------------------------------------------------------
       - name: Replace Lucky Binary Golden Window
         if: env.WRT_TEST != 'true'
@@ -244,15 +262,15 @@ jobs:
           file "$ROOTFS_DIR/usr/bin/lucky"
 
       # ---------------------------------------------------------
-      # 🟢 步骤 3: 继续编译，打包镜像
+      # 🟢 步骤 4: 打包镜像
       # ---------------------------------------------------------
-      - name: Compile Phase 2 Build Images
+      - name: Compile Phase 3 - Build Images
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-          echo "⏳ Starting image packaging..."
+          echo "⏳ Packaging firmware images..."
           make -j$(nproc) image/install || make image/install V=s
-          echo "✅ Phase 2 Complete: Images generated."
+          echo "✅ Firmware images generated."
 
       - name: Machine Information
         run: |
@@ -310,4 +328,4 @@ jobs:
             插件列表：${{env.WRT_LIST}}
             
             ---
-            **注**: 已注入定制版 Lucky 二进制文件 (已强制修复 APK 签名密钥)
+            **注**: 已注入定制版 Lucky 二进制文件 (修复 APK 索引错误)
