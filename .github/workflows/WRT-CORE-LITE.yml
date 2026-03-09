@@ -191,43 +191,44 @@ jobs:
         run: |
           cd ./wrt/
 
-          # 1. 找到 rootfs 目录（通常只有一个）
+          # 1. 找到 rootfs 目录
           ROOTFS_DIR=$(find build_dir/ -maxdepth 2 -type d -name "root.*" | head -n1)
-
           if [ -z "$ROOTFS_DIR" ]; then
             echo "ERROR: rootfs directory not found!"
             exit 1
           fi
           echo "Found rootfs: $ROOTFS_DIR"
 
-          # 2. 确保目标路径存在
-          mkdir -p "$ROOTFS_DIR/usr/bin"
-          mkdir -p "$ROOTFS_DIR/etc/init.d"
-          mkdir -p "$ROOTFS_DIR/etc/config"
+          # 2. 硬编码 IPQ60xx 架构路径（使用 GITHUB_WORKSPACE 定位仓库根目录）
+          ARCH_DIR="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53"
 
-          # 3. 替换 lucky 二进制（假设你已将文件放在仓库的 ./Custom/lucky/ 下）
-          #    例如：./Custom/lucky/x86_64/lucky
-          ARCH_DIR="./Custom/lucky/${WRT_TARGET}"
+          # 3. 验证文件是否存在
           if [ ! -f "$ARCH_DIR/lucky" ]; then
-            echo "ERROR: Custom lucky binary not found for ${WRT_TARGET} in $ARCH_DIR"
+            echo "ERROR: Custom lucky binary not found at: $ARCH_DIR/lucky"
+            echo "Available files in Custom/lucky/:"
+            find "$GITHUB_WORKSPACE/Custom/lucky/" -type f || echo "(No files found)"
             exit 1
           fi
 
+          # 4. 创建目标目录
+          mkdir -p "$ROOTFS_DIR/usr/bin" "$ROOTFS_DIR/etc/init.d" "$ROOTFS_DIR/etc/config"
+
+          # 5. 复制二进制文件
           cp -f "$ARCH_DIR/lucky" "$ROOTFS_DIR/usr/bin/lucky"
           chmod +x "$ROOTFS_DIR/usr/bin/lucky"
 
-          # 4. 替换 init 脚本（可选，但推荐）
+          # 6. 可选：复制 init 脚本
           if [ -f "$ARCH_DIR/lucky.init" ]; then
             cp -f "$ARCH_DIR/lucky.init" "$ROOTFS_DIR/etc/init.d/lucky"
             chmod +x "$ROOTFS_DIR/etc/init.d/lucky"
           fi
 
-          # 5. 替换默认配置（可选）
+          # 7. 可选：复制配置文件
           if [ -f "$ARCH_DIR/lucky.conf" ]; then
             cp -f "$ARCH_DIR/lucky.conf" "$ROOTFS_DIR/etc/config/lucky"
           fi
 
-          echo "✅ Custom lucky binary installed into rootfs."
+          echo "✅ Custom lucky (aarch64_cortex-a53) installed successfully."
 
           
       - name: Machine Information
