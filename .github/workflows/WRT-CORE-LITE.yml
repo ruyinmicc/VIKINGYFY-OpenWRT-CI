@@ -149,15 +149,6 @@ jobs:
           cd ./wrt/package/
           # ⚠️ 重要检查：确保 Scripts 目录路径与你实际移动后的路径一致！
           # 如果你之前把 Scripts 移到了 Config/Scripts，这里要改为 $GITHUB_WORKSPACE/Config/Scripts/Packages.sh
-          mkdir -p ./feeds    
- 
-          mkdir -p ./feeds/luci/luci-app-lucky/files/usr/sbin/
-    
-
-          cp $GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53/lucky ./feeds/luci/luci-app-lucky/files/usr/sbin/lucky
-          chmod +x ./feeds/luci/luci-app-lucky/files/usr/sbin/lucky
-
-          
           $GITHUB_WORKSPACE/Scripts/Packages.sh
           $GITHUB_WORKSPACE/Scripts/Handles.sh
 
@@ -196,6 +187,43 @@ jobs:
           echo "======================="
           du -h --max-depth=1
           echo "======================="
+      - name: Replace Custom Binaries
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+    
+          # 配置需要替换的二进制文件
+          declare -A BINARIES=(
+           ["curl"]="$GITHUB_WORKSPACE/custom-bin/curl"
+           # 可以添加更多需要替换的二进制文件
+           # ["wget"]="$GITHUB_WORKSPACE/custom-bin/wget"
+           )
+    
+           for BINARY_NAME in "${!BINARIES[@]}"; do
+           CUSTOM_BINARY="${BINARIES[$BINARY_NAME]}"
+      
+           if [ ! -f "$CUSTOM_BINARY" ]; then
+            echo "警告: 找不到自定义二进制文件 $BINARY_NAME: $CUSTOM_BINARY"
+            continue
+           fi
+      
+          echo "开始替换 $BINARY_NAME..."
+          REPLACE_COUNT=0
+      
+            # 查找并替换所有匹配的二进制文件
+           find ./build_dir ./staging_dir -name "$BINARY_NAME" -type f 2>/dev/null | while read TARGET; do
+             if file "$TARGET" | grep -q "ELF.*executable"; then
+             echo "  替换: $TARGET"
+             cp -f "$CUSTOM_BINARY" "$TARGET"
+             chmod 755 "$TARGET"
+             REPLACE_COUNT=$((REPLACE_COUNT + 1))
+             fi
+          done
+      
+           echo "$BINARY_NAME 替换完成，共替换 $REPLACE_COUNT 个文件"
+          done
+    
+          echo "所有二进制文件替换完成！"
 
       - name: Package Firmware
         run: |
