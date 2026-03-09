@@ -74,10 +74,11 @@ jobs:
           sudo -E apt -yqq autoremove --purge
           sudo -E apt -yqq autoclean
           sudo -E apt -yqq clean
-          sudo -E apt -yqq install dos2unix python3-netifaces libfuse-dev openssl
+          sudo -E apt -yqq install dos2unix python3-netifaces libfuse-dev
           sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo -E systemctl daemon-reload
           sudo -E timedatectl set-timezone "Asia/Shanghai"
+
           sudo mkdir -p /mnt/build_wrt
           sudo chown $USER:$USER /mnt/build_wrt
           sudo ln -s /mnt/build_wrt $GITHUB_WORKSPACE/wrt
@@ -87,6 +88,7 @@ jobs:
           echo "WRT_DATE=$(TZ=UTC-8 date +"%y.%m.%d-%H.%M.%S")" >> $GITHUB_ENV
           echo "WRT_MARK=${GITHUB_REPOSITORY%%/*}" >> $GITHUB_ENV
           echo "WRT_INFO=${WRT_SOURCE%%/*}" >> $GITHUB_ENV
+          # 注意：这里引用了 Config 目录，请确保你之前移动文件后，Config 目录确实存在且路径正确
           echo "WRT_TARGET=$(grep -m 1 -oP '^CONFIG_TARGET_\K[\w]+(?=\=y)' ./Config/$WRT_CONFIG.txt)" >> $GITHUB_ENV
           echo "WRT_KVER=none" >> $GITHUB_ENV
           echo "WRT_LIST=none" >> $GITHUB_ENV
@@ -145,6 +147,21 @@ jobs:
       - name: Custom Packages
         run: |
           cd ./wrt/package/
+          # ⚠️ 重要检查：确保 Scripts 目录路径与你实际移动后的路径一致！
+          # 如果你之前把 Scripts 移到了 Config/Scripts，这里要改为 $GITHUB_WORKSPACE/Config/Scripts/Packages.sh
+          mkdir -p ./feeds
+    
+    # 示例：替换 luci-app-xxx 包中的二进制文件
+    # 假设你要替换的包是 luci-app-xxx，二进制文件在 /usr/sbin/xxx
+    
+    # 创建包覆盖目录
+          mkdir -p ./feeds/luci/luci-app-lucky/files/usr/sbin/
+    
+    # 复制自定义二进制文件
+          cp $GITHUB_WORKSPACE/C/xxx ./feeds/luci/luci-app-xxx/files/usr/sbin/
+          chmod +x ./feeds/luci/luci-app-xxx/files/usr/sbin/xxx
+
+          
           $GITHUB_WORKSPACE/Scripts/Packages.sh
           $GITHUB_WORKSPACE/Scripts/Handles.sh
 
@@ -152,10 +169,12 @@ jobs:
         run: |
           cd ./wrt/
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
+            # ⚠️ 重要检查：确保 Config 目录路径正确
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
           else
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL-LITE.txt >> .config
           fi
+          # ⚠️ 重要检查：确保 Scripts 目录路径正确
           $GITHUB_WORKSPACE/Scripts/Settings.sh
           make defconfig -j$(nproc) && make clean -j$(nproc)
 
@@ -165,112 +184,11 @@ jobs:
           cd ./wrt/
           make download -j$(nproc)
 
-      # ---------------------------------------------------------
-      # 🟢 步骤 0: 强制生成签名密钥 (无条件)
-      # ---------------------------------------------------------
-      - name: Force Generate APK Signing Key
-        run: |
-          cd ./wrt/
-          echo "🔑 Generating APK signing key..."
-          rm -f private-key.pem
-          openssl genrsa -out private-key.pem 2048
-          chmod 600 private-key.pem
-          ls -l private-key.pem
-
-      # ---------------------------------------------------------
-      # 🟢 步骤 1: 编译目标系统和所有包 (但不进行最后的索引和镜像打包)
-      # 使用 'make -j$(nproc)' 但通过 'world' 的子集来控制
-      # 实际上，为了稳定，我们分三步走：
-      # 1. target/install (内核等)
-      # 2. package/compile (编译所有包生成 .apk)
-      # 3. package/install (安装包并生成索引) <- 之前报错就在这，现在确保前面已完成
-      # ---------------------------------------------------------
-      
-      - name: Compile Phase 1 - Target & Packages
+      - name: Compile Firmware
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-          echo "⏳ Compiling target and packages..."
-          # 先编译目标文件 (内核等)
-          make -j$(nproc) target/install || make target/install V=s
-          # 再编译所有包 (生成 .apk 文件到 staging_dir)
-          make -j$(nproc) package/compile || make package/compile V=s
-          
-          # 检查是否有 .apk 文件生成
-          APK_COUNT=$(find staging_dir/packages/ -name "*.apk" | wc -l)
-          echo "📦 Found $APK_COUNT .apk files in staging_dir."
-          if [ "$APK_COUNT" -eq 0 ]; then
-            echo "⚠️ Warning: No .apk files found. Checking logs..."
-            ls -R staging_dir/packages/ | head -n 20
-          fi
-
-      # ---------------------------------------------------------
-      # 🟢 步骤 2: 安装包 (生成索引) -> 此时应该有 .apk 了
-      # ---------------------------------------------------------
-      - name: Compile Phase 2 - Package Install & Index
-        if: env.WRT_TEST != 'true'
-        run: |
-          cd ./wrt/
-          echo "⏳ Installing packages and creating index..."
-          # 再次确认密钥
-          if [ ! -f "private-key.pem" ]; then exit 1; fi
-          
-          # 执行安装和索引
-          make -j$(nproc) package/install || make package/install V=s
-          echo "✅ Packages installed and indexed."
-
-      # ---------------------------------------------------------
-      # 🟢 步骤 3: 【黄金窗口】替换 Lucky 二进制文件
-      # 此时包已安装进 rootfs，但镜像未打包
-      # ---------------------------------------------------------
-      - name: Replace Lucky Binary Golden Window
-        if: env.WRT_TEST != 'true'
-        run: |
-          cd ./wrt/
-          ROOTFS_DIR=""
-          for pattern in "root-qualcommax" "root-ipq60xx" "root-mvebu" "root-mediatek" "root-x86-64"; do
-            ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d -name "$pattern" 2>/dev/null | head -n1)
-            if [ -n "$ROOTFS_DIR" ]; then break; fi
-          done
-          if [ -z "$ROOTFS_DIR" ]; then
-            ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d -name "root-*" | grep -v "host" | head -n1)
-          fi
-          if [ -z "$ROOTFS_DIR" ]; then
-            echo "❌ ERROR: Cannot find target rootfs directory!"
-            ls -la staging_dir/
-            exit 1
-          fi
-          echo "🎯 Target RootFS: $ROOTFS_DIR"
-
-          ARCH_DIR="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53"
-          if [ ! -f "$ARCH_DIR/lucky" ]; then
-            echo "❌ ERROR: Binary not found at $ARCH_DIR/lucky"
-            exit 1
-          fi
-          
-          mkdir -p "$ROOTFS_DIR/usr/bin"
-          mkdir -p "$ROOTFS_DIR/etc/init.d"
-          cp -f "$ARCH_DIR/lucky" "$ROOTFS_DIR/usr/bin/lucky"
-          chmod +x "$ROOTFS_DIR/usr/bin/lucky"
-          echo "✅ Replaced /usr/bin/lucky"
-          
-          if [ -f "$ARCH_DIR/lucky.init" ]; then
-            cp -f "$ARCH_DIR/lucky.init" "$ROOTFS_DIR/etc/init.d/lucky"
-            chmod +x "$ROOTFS_DIR/etc/init.d/lucky"
-            echo "✅ Replaced /etc/init.d/lucky"
-          fi
-          file "$ROOTFS_DIR/usr/bin/lucky"
-
-      # ---------------------------------------------------------
-      # 🟢 步骤 4: 打包镜像
-      # ---------------------------------------------------------
-      - name: Compile Phase 3 - Build Images
-        if: env.WRT_TEST != 'true'
-        run: |
-          cd ./wrt/
-          echo "⏳ Packaging firmware images..."
-          make -j$(nproc) image/install || make image/install V=s
-          echo "✅ Firmware images generated."
+          make -j$(nproc) || make -j1 V=s
 
       - name: Machine Information
         run: |
@@ -288,8 +206,8 @@ jobs:
           cd ./wrt/ && mkdir ./upload/
           cp -f ./.config ./upload/Config-"$WRT_CONFIG"-"$WRT_INFO"-"$WRT_BRANCH"-"$WRT_DATE".txt
           if [[ $WRT_TEST != 'true' ]]; then
-            echo "WRT_KVER=$(find ./bin/targets/ -type f -name '*.manifest' -exec grep -oP '^kernel - \K[\d\.]+' {} \;)" >> $GITHUB_ENV
-            echo "WRT_LIST=$(find ./bin/targets/ -type f -name '*.manifest' -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
+            echo "WRT_KVER=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^kernel - \K[\d\.]+' {} \;)" >> $GITHUB_ENV
+            echo "WRT_LIST=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
             find ./bin/targets/ -iregex ".*\(buildinfo\|json\|sha256sums\|packages\)$" -exec rm -rf {} +
             for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
               EXT=$(basename $FILE | cut -d '.' -f 2-)
@@ -311,21 +229,14 @@ jobs:
             请注意选择你需要的设备固件！
             不要问，刷就完事了！
             全系带开源硬件加速，别问了！
-            
             源码：${{env.WRT_REPO}}
             分支：${{env.WRT_BRANCH}}
             提交：${{env.WRT_HASH}}
-            
             配置：${{env.WRT_CONFIG}}
             平台：${{env.WRT_TARGET}}
-            
             登录地址：${{env.WRT_IP}}
             登录密码：${{env.WRT_PW}}
             WIFI 名称：${{env.WRT_SSID}}
             WIFI 密码：${{env.WRT_WORD}}
-            
             内核版本：${{env.WRT_KVER}}
             插件列表：${{env.WRT_LIST}}
-            
-            ---
-            **注**: 已注入定制版 Lucky 二进制文件 (修复 APK 索引错误)
