@@ -185,7 +185,51 @@ jobs:
           cd ./wrt/
 
           make -j$(nproc) || make -j1 V=s
+          
+      - name: Replace Lucky Binary with Custom Version (万吉版)
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
 
+          # 1. 找到 rootfs 目录（通常只有一个）
+          ROOTFS_DIR=$(find build_dir/ -maxdepth 2 -type d -name "root.*" | head -n1)
+
+          if [ -z "$ROOTFS_DIR" ]; then
+            echo "ERROR: rootfs directory not found!"
+            exit 1
+          fi
+          echo "Found rootfs: $ROOTFS_DIR"
+
+          # 2. 确保目标路径存在
+          mkdir -p "$ROOTFS_DIR/usr/bin"
+          mkdir -p "$ROOTFS_DIR/etc/init.d"
+          mkdir -p "$ROOTFS_DIR/etc/config"
+
+          # 3. 替换 lucky 二进制（假设你已将文件放在仓库的 ./Custom/lucky/ 下）
+          #    例如：./Custom/lucky/x86_64/lucky
+          ARCH_DIR="./Custom/lucky/${WRT_TARGET}"
+          if [ ! -f "$ARCH_DIR/lucky" ]; then
+            echo "ERROR: Custom lucky binary not found for ${WRT_TARGET} in $ARCH_DIR"
+            exit 1
+          fi
+
+          cp -f "$ARCH_DIR/lucky" "$ROOTFS_DIR/usr/bin/lucky"
+          chmod +x "$ROOTFS_DIR/usr/bin/lucky"
+
+          # 4. 替换 init 脚本（可选，但推荐）
+          if [ -f "$ARCH_DIR/lucky.init" ]; then
+            cp -f "$ARCH_DIR/lucky.init" "$ROOTFS_DIR/etc/init.d/lucky"
+            chmod +x "$ROOTFS_DIR/etc/init.d/lucky"
+          fi
+
+          # 5. 替换默认配置（可选）
+          if [ -f "$ARCH_DIR/lucky.conf" ]; then
+            cp -f "$ARCH_DIR/lucky.conf" "$ROOTFS_DIR/etc/config/lucky"
+          fi
+
+          echo "✅ Custom lucky binary installed into rootfs."
+
+          
       - name: Machine Information
         run: |
           cd ./wrt/
