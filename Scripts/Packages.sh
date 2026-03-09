@@ -77,6 +77,7 @@ UPDATE_PACKAGE "vnt" "lmq8267/luci-app-vnt" "main"
 UPDATE_PACKAGE "lucky" "gdy666/luci-app-lucky" "main"
 UPDATE_PACKAGE "luci-app-adguardhome" "stevenjoezhang/luci-app-adguardhome" "dev"
 UPDATE_PACKAGE "luci-app-timecontrol" "TimouL/luci-app-timecontrol" "main"
+UPDATE_PACKAGE "msd_lite" "zfdx123/msd_lite"  "master"
 
 #更新软件包版本
 UPDATE_VERSION() {
