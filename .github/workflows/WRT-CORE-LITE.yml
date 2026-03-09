@@ -179,57 +179,103 @@ jobs:
 
           make download -j$(nproc)
 
-      - name: Compile Firmware
+      # ---------------------------------------------------------
+      # 步骤 1: 编译直到“包安装”阶段结束
+      # 此时所有软件包已解压到 staging_dir，但尚未打包成固件镜像
+      # ---------------------------------------------------------
+      - name: Compile Phase 1: Package Install
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-
-          make -j$(nproc) || make -j1 V=s
+          echo "⏳ Starting compilation up to package/install..."
           
-      - name: Replace Lucky Binary with Custom Version (万吉版)
+          # 执行编译直到 package/install 完成
+          # 如果并行编译出错，尝试单线程重试以确保停止在正确位置
+          make -j$(nproc) package/install || make package/install V=s
+          
+          echo "✅ Phase 1 Complete: All packages installed to staging_dir."
+
+      # ---------------------------------------------------------
+      # 步骤 2: 【黄金窗口】替换 Lucky 二进制文件
+      # 直接操作 staging_dir 中的 rootfs 目录，这是即将被打包的源
+      # ---------------------------------------------------------
+      - name: Replace Lucky Binary (Golden Window)
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-
-          # 1. 找到 rootfs 目录
-          ROOTFS_DIR=$(find build_dir/ -maxdepth 2 -type d -name "root.*" | head -n1)
+          
+          # 1. 动态查找目标 rootfs 目录
+          # IPQ60xx 通常对应 root-qualcommax 或 root-ipq60xx
+          ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d \( -name "root-qualcommax" -o -name "root-ipq60xx" -o -name "root-mvebu" \) | head -n1)
+          
+          # 如果没找到特定架构名，尝试通用匹配 (排除 host 目录)
           if [ -z "$ROOTFS_DIR" ]; then
-            echo "ERROR: rootfs directory not found!"
+            ROOTFS_DIR=$(find staging_dir/target-* -maxdepth 1 -type d -name "root-*" | grep -v "host" | head -n1)
+          fi
+
+          if [ -z "$ROOTFS_DIR" ]; then
+            echo "❌ ERROR: Cannot find target rootfs directory in staging_dir!"
+            echo "Available directories in staging_dir:"
+            ls -la staging_dir/
             exit 1
           fi
-          echo "Found rootfs: $ROOTFS_DIR"
+          
+          echo "🎯 Target RootFS Directory: $ROOTFS_DIR"
 
-          # 2. 硬编码 IPQ60xx 架构路径（使用 GITHUB_WORKSPACE 定位仓库根目录）
+          # 2. 定义源文件路径 (基于你的仓库结构)
           ARCH_DIR="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53"
-
-          # 3. 验证文件是否存在
+          
+          # 3. 验证源文件是否存在
           if [ ! -f "$ARCH_DIR/lucky" ]; then
-            echo "ERROR: Custom lucky binary not found at: $ARCH_DIR/lucky"
-            echo "Available files in Custom/lucky/:"
-            find "$GITHUB_WORKSPACE/Custom/lucky/" -type f || echo "(No files found)"
+            echo "❌ ERROR: Custom lucky binary not found at: $ARCH_DIR/lucky"
             exit 1
           fi
+          echo "📦 Found custom binary: $ARCH_DIR/lucky"
 
-          # 4. 创建目标目录
-          mkdir -p "$ROOTFS_DIR/usr/bin" "$ROOTFS_DIR/etc/init.d" "$ROOTFS_DIR/etc/config"
-
-          # 5. 复制二进制文件
+          # 4. 创建目标目录并替换文件
+          mkdir -p "$ROOTFS_DIR/usr/bin"
+          mkdir -p "$ROOTFS_DIR/etc/init.d"
+          
+          # 覆盖二进制
           cp -f "$ARCH_DIR/lucky" "$ROOTFS_DIR/usr/bin/lucky"
           chmod +x "$ROOTFS_DIR/usr/bin/lucky"
-
-          # 6. 可选：复制 init 脚本
+          echo "✅ Replaced /usr/bin/lucky"
+          
+          # 覆盖启动脚本 (如果存在)
           if [ -f "$ARCH_DIR/lucky.init" ]; then
             cp -f "$ARCH_DIR/lucky.init" "$ROOTFS_DIR/etc/init.d/lucky"
             chmod +x "$ROOTFS_DIR/etc/init.d/lucky"
+            echo "✅ Replaced /etc/init.d/lucky"
+          else
+            echo "⚠️ No custom init script found, skipping."
           fi
+          
+          # 5. 验证替换结果
+          echo "--- Verification ---"
+          ls -l "$ROOTFS_DIR/usr/bin/lucky"
+          file "$ROOTFS_DIR/usr/bin/lucky"
+          echo "---------------------"
+          echo "✅ Replacement successful. Ready for image packing."
 
-          # 7. 可选：复制配置文件
-          if [ -f "$ARCH_DIR/lucky.conf" ]; then
-            cp -f "$ARCH_DIR/lucky.conf" "$ROOTFS_DIR/etc/config/lucky"
-          fi
-
-          echo "✅ Custom lucky (aarch64_cortex-a53) installed successfully."
-
+      # ---------------------------------------------------------
+      # 步骤 3: 继续编译，执行“镜像打包”阶段
+      # 这将读取刚才修改过的 staging_dir 并生成最终的 .bin/.itb 文件
+      # ---------------------------------------------------------
+      - name: Compile Phase 2: Build Images
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          echo "⏳ Starting image packaging..."
+          
+          # 执行 image/install 目标，这将触发 mkfs/mkits 等打包工具
+          make -j$(nproc) image/install || make image/install V=s
+          
+          echo "✅ Phase 2 Complete: Firmware images generated with custom lucky."
+          
+          # 简单检查生成的文件
+          echo "--- Generated Files ---"
+          find bin/targets/ -type f -name "*.bin" -o -name "*.itb" | head -10
+          
           
       - name: Machine Information
         run: |
