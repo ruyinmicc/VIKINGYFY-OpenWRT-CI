@@ -149,15 +149,11 @@ jobs:
           cd ./wrt/package/
           # ⚠️ 重要检查：确保 Scripts 目录路径与你实际移动后的路径一致！
           # 如果你之前把 Scripts 移到了 Config/Scripts，这里要改为 $GITHUB_WORKSPACE/Config/Scripts/Packages.sh
-          mkdir -p ./feeds
-    
-    # 示例：替换 luci-app-xxx 包中的二进制文件
-    # 假设你要替换的包是 luci-app-xxx，二进制文件在 /usr/sbin/xxx
-    
-    # 创建包覆盖目录
+          mkdir -p ./feeds    
+ 
           mkdir -p ./feeds/luci/luci-app-lucky/files/usr/sbin/
     
-    # 复制自定义二进制文件
+
           cp $GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53/lucky ./feeds/luci/luci-app-lucky/files/usr/sbin/lucky
           chmod +x ./feeds/luci/luci-app-lucky/files/usr/sbin/lucky
 
