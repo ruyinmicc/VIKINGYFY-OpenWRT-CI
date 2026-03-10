@@ -1,141 +1,187 @@
-# 云编译公用核心
 name: WRT-CORE-LITE
 
 on:
   workflow_call:
     inputs:
       WRT_CONFIG:
+        description: '配置文件名 (不含后缀)'
         required: true
         type: string
       WRT_THEME:
+        description: '主题名称'
         required: true
         type: string
       WRT_NAME:
+        description: '固件名称标识'
         required: true
         type: string
       WRT_SSID:
+        description: 'WiFi 名称'
         required: true
         type: string
       WRT_WORD:
+        description: 'WiFi 密码'
         required: true
         type: string
       WRT_IP:
+        description: '管理 IP'
         required: true
         type: string
       WRT_PW:
+        description: '管理密码'
         required: true
         type: string
       WRT_REPO:
+        description: '源码仓库地址'
         required: true
         type: string
       WRT_BRANCH:
+        description: '源码分支'
         required: true
         type: string
       WRT_SOURCE:
+        description: '源码标识 (用于 Job 名称)'
         required: true
         type: string
       WRT_PACKAGE:
+        description: '额外包标识'
         required: false
         type: string
       WRT_TEST:
+        description: '是否仅测试 (不编译固件)'
         required: false
         type: string
+        default: 'false'
 
 env:
-  GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
-  WRT_CONFIG: ${{inputs.WRT_CONFIG}}
-  WRT_THEME: ${{inputs.WRT_THEME}}
-  WRT_NAME: ${{inputs.WRT_NAME}}
-  WRT_SSID: ${{inputs.WRT_SSID}}
-  WRT_WORD: ${{inputs.WRT_WORD}}
-  WRT_IP: ${{inputs.WRT_IP}}
-  WRT_PW: ${{inputs.WRT_PW}}
-  WRT_REPO: ${{inputs.WRT_REPO}}
-  WRT_BRANCH: ${{inputs.WRT_BRANCH}}
-  WRT_SOURCE: ${{inputs.WRT_SOURCE}}
-  WRT_PACKAGE: ${{inputs.WRT_PACKAGE}}
-  WRT_TEST: ${{inputs.WRT_TEST}}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # 映射输入到环境变量
+  WRT_CONFIG: ${{ inputs.WRT_CONFIG }}
+  WRT_THEME: ${{ inputs.WRT_THEME }}
+  WRT_NAME: ${{ inputs.WRT_NAME }}
+  WRT_SSID: ${{ inputs.WRT_SSID }}
+  WRT_WORD: ${{ inputs.WRT_WORD }}
+  WRT_IP: ${{ inputs.WRT_IP }}
+  WRT_PW: ${{ inputs.WRT_PW }}
+  WRT_REPO: ${{ inputs.WRT_REPO }}
+  WRT_BRANCH: ${{ inputs.WRT_BRANCH }}
+  WRT_SOURCE: ${{ inputs.WRT_SOURCE }}
+  WRT_PACKAGE: ${{ inputs.WRT_PACKAGE }}
+  WRT_TEST: ${{ inputs.WRT_TEST }}
+  
+  # 定义基础路径，方便统一修改
+  BASE_CONFIG_PATH: "./Config"
+  BASE_SCRIPTS_PATH: "./Scripts"
 
 jobs:
   core:
-    name: ${{inputs.WRT_SOURCE}}
+    name: ${{ inputs.WRT_SOURCE }}
     runs-on: ubuntu-latest
+    
     steps:
       - name: Checkout Projects
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Initialization Environment
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          echo "=== 开始初始化环境 ==="
           sudo -E apt -yqq purge firefox
           sudo -E apt -yqq update
           sudo -E apt -yqq full-upgrade
           sudo -E apt -yqq autoremove --purge
           sudo -E apt -yqq autoclean
           sudo -E apt -yqq clean
-          sudo -E apt -yqq install dos2unix python3-netifaces libfuse-dev
+          
+          # 安装必要依赖
+          sudo -E apt -yqq install dos2unix python3-netifaces libfuse-dev git subversion curl wget unzip
+  
+          # 初始化 ImmortalWrt/OpenWrt 构建环境
           sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+          
           sudo -E systemctl daemon-reload
           sudo -E timedatectl set-timezone "Asia/Shanghai"
-
+  
+          # 创建挂载点以节省空间 (GitHub Actions 磁盘空间有限)
           sudo mkdir -p /mnt/build_wrt
           sudo chown $USER:$USER /mnt/build_wrt
           sudo ln -s /mnt/build_wrt $GITHUB_WORKSPACE/wrt
+          echo "=== 环境初始化完成 ==="
 
       - name: Initialization Values
         run: |
           echo "WRT_DATE=$(TZ=UTC-8 date +"%y.%m.%d-%H.%M.%S")" >> $GITHUB_ENV
           echo "WRT_MARK=${GITHUB_REPOSITORY%%/*}" >> $GITHUB_ENV
           echo "WRT_INFO=${WRT_SOURCE%%/*}" >> $GITHUB_ENV
-          # 注意：这里引用了 Config 目录，请确保你之前移动文件后，Config 目录确实存在且路径正确
-          echo "WRT_TARGET=$(grep -m 1 -oP '^CONFIG_TARGET_\K[\w]+(?=\=y)' ./Config/$WRT_CONFIG.txt)" >> $GITHUB_ENV
+          
+          # 安全检查：确认配置文件存在
+          CONFIG_FILE="$GITHUB_WORKSPACE/$BASE_CONFIG_PATH/$WRT_CONFIG.txt"
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "::error::配置文件不存在：$CONFIG_FILE"
+            exit 1
+          fi
+          
+          # 提取 Target 架构
+          TARGET=$(grep -m 1 -oP '^CONFIG_TARGET_\K[\w]+(?=\=y)' "$CONFIG_FILE" || echo "unknown")
+          echo "WRT_TARGET=$TARGET" >> $GITHUB_ENV
+          
           echo "WRT_KVER=none" >> $GITHUB_ENV
           echo "WRT_LIST=none" >> $GITHUB_ENV
+          echo "检测到目标平台：$TARGET"
 
       - name: Clone Code
         run: |
+          echo "=== 克隆源码：$WRT_REPO ($WRT_BRANCH) ==="
           git clone --depth=1 --single-branch --branch $WRT_BRANCH $WRT_REPO ./wrt/
-          cd ./wrt/ && echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
+          cd ./wrt/
+          echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
+          
+          # 移除国内镜像源，防止拉取冲突 (根据需求可选)
           PROJECT_MIRRORS_FILE="./scripts/projectsmirrors.json"
           if [ -f "$PROJECT_MIRRORS_FILE" ]; then
             sed -i '/.cn\//d; /tencent/d; /aliyun/d' "$PROJECT_MIRRORS_FILE"
+            echo "已清理项目镜像配置"
           fi
 
-      - name: Check Scripts
+      - name: Check Scripts & Configs
         run: |
-          find ./ -maxdepth 3 -type f -iregex ".*\(txt\|sh\)$" -exec dos2unix {} \; -exec chmod +x {} \;
+          echo "=== 检查脚本权限与格式 ==="
+          # 转换所有相关脚本为 Unix 格式并赋予执行权限
+          find $GITHUB_WORKSPACE -maxdepth 4 -type f $ -name "*.sh" -o -name "*.txt" $ -exec dos2unix {} \;
+          find $GITHUB_WORKSPACE/$BASE_SCRIPTS_PATH -type f -name "*.sh" -exec chmod +x {} \; 2>/dev/null || echo "未找到 Scripts 目录或为空"
+          
+          # 验证关键脚本是否存在
+          for script in Packages.sh Handles.sh Settings.sh; do
+            if [ ! -f "$GITHUB_WORKSPACE/$BASE_SCRIPTS_PATH/$script" ]; then
+               echo "::warning::未找到关键脚本：$BASE_SCRIPTS_PATH/$script，编译可能会失败"
+            fi
+          done
 
       - name: Check Caches
         id: check-cache
         if: env.WRT_TEST != 'true'
-        uses: actions/cache@main
+        uses: actions/cache@v4
         with:
-          key: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_HASH}}
-          restore-keys: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}
           path: |
             ./wrt/.ccache
             ./wrt/staging_dir/host*
             ./wrt/staging_dir/tool*
+          key: ${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-${{ env.WRT_HASH }}
+          restore-keys: |
+            ${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}
 
-      - name: Update Caches
-        if: env.WRT_TEST != 'true'
+      - name: Update Caches Logic
+        if: env.WRT_TEST != 'true' && steps.check-cache.outputs.cache-hit != 'true'
         run: |
-          if [ -d "./wrt/staging_dir" ]; then
-            find "./wrt/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r DIR; do
-              find "$DIR" -type f -exec touch {} +
-            done
-            mkdir -p ./wrt/tmp && echo "1" > ./wrt/tmp/.build
-            echo "toolchain skiped done!"
-          else
-            echo "caches missed!"
-          fi
-          if ${{steps.check-cache.outputs.cache-hit != 'true'}}; then
-            CACHE_LIST=$(gh cache list --key "$WRT_CONFIG-$WRT_INFO" | cut -f 1)
+          echo "缓存未命中，准备清理旧缓存..."
+          # 清理同配置下的旧缓存，避免占用过多空间
+          CACHE_LIST=$(gh cache list --key "${WRT_CONFIG}-${WRT_INFO}" --limit 100 | cut -f 1 || true)
+          if [ -n "$CACHE_LIST" ]; then
             for CACHE_KEY in $CACHE_LIST; do
-              gh cache delete $CACHE_KEY
+              gh cache delete $CACHE_KEY || true
             done
-            echo "caches cleanup done!"
+            echo "旧缓存清理完成"
           fi
 
       - name: Update Feeds
@@ -147,96 +193,154 @@ jobs:
       - name: Custom Packages
         run: |
           cd ./wrt/package/
-          # ⚠️ 重要检查：确保 Scripts 目录路径与你实际移动后的路径一致！
-          # 如果你之前把 Scripts 移到了 Config/Scripts，这里要改为 $GITHUB_WORKSPACE/Config/Scripts/Packages.sh
-          $GITHUB_WORKSPACE/Scripts/Packages.sh
-          $GITHUB_WORKSPACE/Scripts/Handles.sh
+          echo "=== 执行自定义包脚本 ==="
+          if [ -f "$GITHUB_WORKSPACE/$BASE_SCRIPTS_PATH/Packages.sh" ]; then
+            $GITHUB_WORKSPACE/$BASE_SCRIPTS_PATH/Packages.sh
+          else
+            echo "::warning::Packages.sh 不存在，跳过"
+          fi
+          
+          if [ -f "$GITHUB_WORKSPACE/$BASE_SCRIPTS_PATH/Handles.sh" ]; then
+            $GITHUB_WORKSPACE/$BASE_SCRIPTS_PATH/Handles.sh
+          else
+            echo "::warning::Handles.sh 不存在，跳过"
+          fi
 
       - name: Custom Settings
         run: |
           cd ./wrt/
+          echo "=== 应用配置文件 ==="
+          CONFIG_MAIN="$GITHUB_WORKSPACE/$BASE_CONFIG_PATH/$WRT_CONFIG.txt"
+          CONFIG_GENERAL="$GITHUB_WORKSPACE/$BASE_CONFIG_PATH/GENERAL-LITE.txt"
+          
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
-            # ⚠️ 重要检查：确保 Config 目录路径正确
-            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
+            cat "$CONFIG_MAIN" >> .config
           else
-            cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL-LITE.txt >> .config
+            cat "$CONFIG_MAIN" >> .config
+            if [ -f "$CONFIG_GENERAL" ]; then
+              cat "$CONFIG_GENERAL" >> .config
+            fi
           fi
-          # ⚠️ 重要检查：确保 Scripts 目录路径正确
-          $GITHUB_WORKSPACE/Scripts/Settings.sh
-          make defconfig -j$(nproc) && make clean -j$(nproc)
+          
+          echo "=== 执行设置脚本 ==="
+          if [ -f "$GITHUB_WORKSPACE/$BASE_SCRIPTS_PATH/Settings.sh" ]; then
+            $GITHUB_WORKSPACE/$BASE_SCRIPTS_PATH/Settings.sh
+          else
+            echo "::warning::Settings.sh 不存在，跳过"
+          fi
+          
+          make defconfig -j$(nproc)
+          # 仅在非测试模式下 clean，测试模式保留现场
+          if [ "$WRT_TEST" != "true" ]; then
+             make clean -j$(nproc)
+          fi
 
       - name: Download Packages
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
+          echo "=== 下载源码包 ==="
           make download -j$(nproc)
 
       - name: Compile Firmware
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
+          echo "=== 开始编译 (并行度：$(nproc)) ==="
+          # 尝试并行编译，失败则单线程详细输出以便调试
           make -j$(nproc) || make -j1 V=s
-          
+
       - name: Replace Lucky Binary
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
           CUSTOM_LUCKY="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53/lucky"
           if [ -f "$CUSTOM_LUCKY" ]; then
+            echo "=== 发现自定义 Lucky 二进制，开始替换 ==="
+            COUNT=0
             find ./build_dir ./staging_dir -path "*/usr/bin/lucky" -type f | while read BINARY; do
               cp -f "$CUSTOM_LUCKY" "$BINARY"
               chmod 755 "$BINARY"
+              COUNT=$((COUNT+1))
             done
-            echo "lucky替换完成"
+            echo "Lucky 替换完成，共处理文件数：$COUNT (注意：while 循环内变量统计可能有误，以实际找到的文件为准)"
+          else
+            echo "未找到自定义 Lucky 二进制，跳过替换步骤。路径期望：$CUSTOM_LUCKY"
           fi
-          
+
       - name: Machine Information
         run: |
           cd ./wrt/
           echo "======================="
-          lscpu | grep -E "name|Core|Thread"
+          lscpu | grep -E "name|Core|Thread" || true
           echo "======================="
           df -h
           echo "======================="
-          du -h --max-depth=1
-          echo "======================="
+          du -h --max-depth=1 ./bin/targets/ || true
 
       - name: Package Firmware
         run: |
-          cd ./wrt/ && mkdir ./upload/
+          cd ./wrt/ && mkdir -p ./upload/
           cp -f ./.config ./upload/Config-"$WRT_CONFIG"-"$WRT_INFO"-"$WRT_BRANCH"-"$WRT_DATE".txt
+          
           if [[ $WRT_TEST != 'true' ]]; then
-            echo "WRT_KVER=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^kernel - \K[\d\.]+' {} \;)" >> $GITHUB_ENV
-            echo "WRT_LIST=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
-            find ./bin/targets/ -iregex ".*\(buildinfo\|json\|sha256sums\|packages\)$" -exec rm -rf {} +
+            # 提取内核版本
+            KVER=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^kernel - \K[\d\.]+' {} \; | head -n 1)
+            echo "WRT_KVER=${KVER:-unknown}" >> $GITHUB_ENV
+            
+            # 提取插件列表
+            PLUGINS=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ' | xargs)
+            echo "WRT_LIST=${PLUGINS:-none}" >> $GITHUB_ENV
+            
+            # 清理无用文件
+            find ./bin/targets/ -iregex ".*$buildinfo\|json\|sha256sums\|packages$$" -exec rm -rf {} +
+            
+            # 重命名并移动固件
             for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
-              EXT=$(basename $FILE | cut -d '.' -f 2-)
-              NAME=$(basename $FILE | cut -d '.' -f 1 | grep -io "\($WRT_TARGET\).*")
-              NEW_FILE="$WRT_INFO"-"$WRT_BRANCH"-"$NAME"-"$WRT_DATE"."$EXT"
-              mv -f $FILE ./upload/$NEW_FILE
+              EXT=$(basename "$FILE" | cut -d '.' -f 2-)
+              NAME_PART=$(basename "$FILE" | cut -d '.' -f 1 | grep -io "$$WRT_TARGET$.*" || basename "$FILE" | cut -d '.' -f 1)
+              NEW_FILE="$WRT_INFO"-"$WRT_BRANCH"-"$NAME_PART"-"$WRT_DATE"."$EXT"
+              mv -f "$FILE" ./upload/"$NEW_FILE"
+              echo "打包：$NEW_FILE"
             done
-            find ./bin/targets/ -type f -exec mv -f {} ./upload/ \;
+            
+            # 移动其余相关文件 (如 sysupgrade, factory 等可能没匹配到上面的逻辑)
+            find ./bin/targets/ -type f -exec mv -f {} ./upload/ \; 2>/dev/null || true
+            
             make clean -j$(nproc)
+          else
+            echo "测试模式，跳过固件打包"
           fi
 
       - name: Release Firmware
-        uses: softprops/action-gh-release@master
+        if: env.WRT_TEST != 'true'
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_BRANCH}}-${{env.WRT_DATE}}
-          files: ./wrt/upload/*.*
+          tag_name: ${{ env.WRT_CONFIG }}-${{ env.WRT_INFO }}-${{ env.WRT_BRANCH }}-${{ env.WRT_DATE }}
+          name: ${{ env.WRT_NAME }} - ${{ env.WRT_DATE }}
+          files: ./wrt/upload/*
+          draft: false
+          prerelease: false
           body: |
-            这是个平台固件包，内含多个设备！
-            请注意选择你需要的设备固件！
-            不要问，刷就完事了！
-            全系带开源硬件加速，别问了！
-            源码：${{env.WRT_REPO}}
-            分支：${{env.WRT_BRANCH}}
-            提交：${{env.WRT_HASH}}
-            配置：${{env.WRT_CONFIG}}
-            平台：${{env.WRT_TARGET}}
-            登录地址：${{env.WRT_IP}}
-            登录密码：${{env.WRT_PW}}
-            WIFI 名称：${{env.WRT_SSID}}
-            WIFI 密码：${{env.WRT_WORD}}
-            内核版本：${{env.WRT_KVER}}
-            插件列表：${{env.WRT_LIST}}
+            ### 📦 固件发布信息
+            
+            | 项目 | 内容 |
+            | :--- | :--- |
+            | **源码** | ${{ env.WRT_REPO }} |
+            | **分支** | ${{ env.WRT_BRANCH }} |
+            | **提交** | ${{ env.WRT_HASH }} |
+            | **配置** | ${{ env.WRT_CONFIG }} |
+            | **平台** | ${{ env.WRT_TARGET }} |
+            | **内核** | ${{ env.WRT_KVER }} |
+            
+            ### 🔐 默认信息
+            - **管理地址**: `${{ env.WRT_IP }}`
+            - **管理密码**: `${{ env.WRT_PW }}`
+            - **WiFi 名称**: `${{ env.WRT_SSID }}`
+            - **WiFi 密码**: `${{ env.WRT_WORD }}`
+            
+            ### 🧩 包含插件
+            ${{ env.WRT_LIST }}
+            
+            > ⚠️ **注意**: 这是个平台固件包，内含多个设备固件！请选择对应你设备的型号刷入。
+            > 💡 全系带开源硬件加速。
