@@ -176,7 +176,20 @@ jobs:
         run: |
           cd ./wrt/
           make -j$(nproc) || make -j1 V=s
-
+          
+      - name: Replace Lucky Binary
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          CUSTOM_LUCKY="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53/lucky"
+          if [ -f "$CUSTOM_LUCKY" ]; then
+            find ./build_dir ./staging_dir -path "*/usr/bin/lucky" -type f | while read BINARY; do
+              cp -f "$CUSTOM_LUCKY" "$BINARY"
+              chmod 755 "$BINARY"
+            done
+            echo "lucky替换完成"
+          fi
+          
       - name: Machine Information
         run: |
           cd ./wrt/
@@ -187,43 +200,6 @@ jobs:
           echo "======================="
           du -h --max-depth=1
           echo "======================="
-      - name: Replace Custom Binaries
-        if: env.WRT_TEST != 'true'
-        run: |
-          cd ./wrt/
-    
-          # 配置需要替换的二进制文件
-          declare -A BINARIES=(
-           ["lucky"]="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53/lucky"
-           # 可以添加更多需要替换的二进制文件
-           # ["wget"]="$GITHUB_WORKSPACE/custom-bin/wget"
-           )
-    
-           for BINARY_NAME in "${!BINARIES[@]}"; do
-           CUSTOM_BINARY="${BINARIES[$BINARY_NAME]}"
-      
-           if [ ! -f "$CUSTOM_BINARY" ]; then
-            echo "警告: 找不到自定义二进制文件 $BINARY_NAME: $CUSTOM_BINARY"
-            continue
-           fi
-      
-          echo "开始替换 $BINARY_NAME..."
-          REPLACE_COUNT=0
-      
-            # 查找并替换所有匹配的二进制文件
-           find ./build_dir ./staging_dir -name "$BINARY_NAME" -type f 2>/dev/null | while read TARGET; do
-             if file "$TARGET" | grep -q "ELF.*executable"; then
-             echo "  替换: $TARGET"
-             cp -f "$CUSTOM_BINARY" "$TARGET"
-             chmod 755 "$TARGET"
-             REPLACE_COUNT=$((REPLACE_COUNT + 1))
-             fi
-          done
-      
-           echo "$BINARY_NAME 替换完成，共替换 $REPLACE_COUNT 个文件"
-          done
-    
-          echo "所有二进制文件替换完成！"
 
       - name: Package Firmware
         run: |
