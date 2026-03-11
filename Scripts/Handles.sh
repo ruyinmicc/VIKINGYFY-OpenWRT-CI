@@ -125,16 +125,6 @@ if [ -n "$LUCKY_PKG" ] && [ -f "$LOCAL_LUCKY" ]; then
     # 设置可执行权限（关键！）
     chmod +x "$LUCKY_PKG/files/usr/bin/lucky"
 
-    # （可选）验证架构
-    if command -v file >/dev/null; then
-        ARCH=$(file "$LOCAL_LUCKY" | grep -o 'aarch64\|ARM aarch64')
-        if [ -z "$ARCH" ]; then
-            echo "⚠️ Warning: lucky may not be aarch64! Check architecture."
-        else
-            echo "✅ Architecture check passed: aarch64"
-        fi
-    fi
-
     # 🛑 关键：禁用原插件的编译逻辑（防止被覆盖）
     # 查找并删除 Makefile 中的 Build/Compile 部分
     MAKEFILE="$LUCKY_PKG/Makefile"
