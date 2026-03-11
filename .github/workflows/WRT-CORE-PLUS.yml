@@ -289,3 +289,63 @@ jobs:
                     rm -rf "$WORK_DIR"
                   else
                     echo "  ⚠️  No lucky found in this firmware"
+                  fi
+                done
+                
+                if [ $FIRMWARE_FOUND -eq 0 ]; then
+                  echo "⚠️  No firmware with lucky found to replace"
+                else
+                  echo "✅ Lucky replacement completed for $FIRMWARE_FOUND firmware(s)"
+                fi
+                
+                rm -f "$LUCKY_FILE"
+              else
+                echo "❌ Downloaded file is empty"
+              fi
+            else
+              echo "❌ Failed to download lucky binary"
+            fi
+            
+            echo "========================================="
+            # ========== 结束 lucky 替换 ==========
+
+            # 原来的固件移动逻辑
+            for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
+              EXT=$(basename $FILE | cut -d '.' -f 2-)
+              NAME=$(basename $FILE | cut -d '.' -f 1 | grep -io "\($WRT_TARGET\).*")
+              NEW_FILE="$WRT_INFO"-"$WRT_BRANCH"-"$WRT_WIFI"-"$NAME"-"$WRT_DATE"."$EXT"
+              mv -f $FILE ./upload/$NEW_FILE
+            done
+
+            find ./bin/targets/ -type f -exec mv -f {} ./upload/ \;
+
+            make clean -j$(nproc)
+          fi
+
+      - name: Release Firmware
+        uses: softprops/action-gh-release@master
+        with:
+          tag_name: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_BRANCH}}-${{env.WRT_DATE}}
+          files: ./wrt/upload/*.*
+          body: |
+            这是个平台固件包，内含多个设备！
+            请注意选择你需要的设备固件！
+            不要问，刷就完事了！
+
+            全系带开源硬件加速，别问了！
+
+            源码：${{env.WRT_REPO}}
+            分支：${{env.WRT_BRANCH}}
+            提交：${{env.WRT_HASH}}
+
+            配置：${{env.WRT_CONFIG}}
+            平台：${{env.WRT_TARGET}}
+
+            登录地址：${{env.WRT_IP}}
+            登录密码：${{env.WRT_PW}}
+
+            WIFI名称：${{env.WRT_SSID}}
+            WIFI密码：${{env.WRT_WORD}}
+
+            内核版本：${{env.WRT_KVER}}
+            插件列表：${{env.WRT_LIST}}
