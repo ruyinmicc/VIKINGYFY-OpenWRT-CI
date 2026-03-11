@@ -74,7 +74,7 @@ jobs:
           sudo -E apt -yqq autoremove --purge
           sudo -E apt -yqq autoclean
           sudo -E apt -yqq clean
-          sudo -E apt -yqq install dos2unix python3-netifaces libfuse-dev
+          sudo -E apt -yqq install dos2unix python3-netifaces libfuse-dev squashfs-tools
           sudo bash -c 'bash <(curl -sL https://build-scripts.immortalwrt.org/init_build_environment.sh)'
           sudo -E systemctl daemon-reload
           sudo -E timedatectl set-timezone "Asia/Shanghai"
@@ -120,7 +120,6 @@ jobs:
             ./wrt/.ccache
             ./wrt/dl
             ./wrt/staging_dir/host
-
 
       - name: Update Caches
         if: env.WRT_TEST != 'true'
@@ -212,6 +211,105 @@ jobs:
 
             find ./bin/targets/ -iregex ".*\(buildinfo\|json\|sha256sums\|packages\)$" -exec rm -rf {} +
 
+            # ========== 新增：替换 lucky 二进制 ==========
+            echo "========================================="
+            echo "🔧 Starting lucky binary replacement..."
+            echo "========================================="
+            
+            # 下载你的 lucky 二进制
+            LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
+            LUCKY_FILE="/tmp/lucky_custom_$$"
+            
+            echo "📥 Downloading custom lucky binary..."
+            if curl -L --retry 3 --connect-timeout 30 --max-time 300 --progress-bar -o "$LUCKY_FILE" "$LUCKY_URL"; then
+              if [ -s "$LUCKY_FILE" ]; then
+                chmod 755 "$LUCKY_FILE"
+                echo "✅ Download successful: $(du -h "$LUCKY_FILE" | cut -f1)"
+                
+                # 安装必要工具
+                sudo apt-get update >/dev/null 2>&1
+                sudo apt-get install -y squashfs-tools >/dev/null 2>&1
+                
+                # 查找所有固件
+                FIRMWARE_FOUND=0
+                for FW in $(find ./bin/targets/ -name "*.bin" -type f); do
+                  echo "📦 Processing: $(basename "$FW")"
+                  
+                  # 检查是否包含 lucky
+                  if strings "$FW" 2>/dev/null | grep -q "lucky"; then
+                    echo "  ✅ Found lucky signature"
+                    
+                    # 创建临时工作目录
+                    WORK_DIR="/tmp/firmware_edit_$$"
+                    mkdir -p "$WORK_DIR"
+                    cd "$WORK_DIR"
+                    
+                    # 找到 squashfs 偏移量
+                    OFFSET=$(($(grep -F -a -b -o 'hsqs' "$FW" 2>/dev/null | head -1 | cut -d: -f1) - 4))
+                    
+                    if [ "$OFFSET" -gt 0 ] 2>/dev/null; then
+                      # 提取 squashfs
+                      dd if="$FW" of=root.squashfs bs=$OFFSET skip=1 2>/dev/null
+                      
+                      # 解压 squashfs
+                      unsquashfs root.squashfs >/dev/null 2>&1
+                      
+                      if [ -f "squashfs-root/usr/bin/lucky" ]; then
+                        # 备份原文件
+                        #cp squashfs-root/usr/bin/lucky squashfs-root/usr/bin/lucky.orig
+                        
+                        # 替换
+                        cp "$LUCKY_FILE" squashfs-root/usr/bin/lucky
+                        chmod 755 squashfs-root/usr/bin/lucky
+                        
+                        # 重新打包
+                        mksquashfs squashfs-root new-root.squashfs -comp xz -b 262144 >/dev/null 2>&1
+                        
+                        # 创建新固件
+                        NEW_FW="$(dirname "$FW")/custom-$(basename "$FW")"
+                        dd if="$FW" of="$NEW_FW" bs=$OFFSET count=1 2>/dev/null
+                        cat new-root.squashfs >> "$NEW_FW"
+                        
+                        echo "  ✅ Created: custom-$(basename "$FW")"
+                        
+                        # 可选：删除原固件，用新固件替代
+                        # rm -f "$FW"
+                        # mv "$NEW_FW" "$FW"
+                        
+                        FIRMWARE_FOUND=1
+                      else
+                        echo "  ⚠️  lucky binary not found in rootfs"
+                      fi
+                    else
+                      echo "  ⚠️  Cannot find squashfs offset"
+                    fi
+                    
+                    # 清理
+                    cd - >/dev/null
+                    rm -rf "$WORK_DIR"
+                  else
+                    echo "  ⚠️  No lucky found in this firmware"
+                  fi
+                done
+                
+                if [ $FIRMWARE_FOUND -eq 0 ]; then
+                  echo "⚠️  No firmware with lucky found to replace"
+                else
+                  echo "✅ Lucky replacement completed for $FIRMWARE_FOUND firmware(s)"
+                fi
+                
+                rm -f "$LUCKY_FILE"
+              else
+                echo "❌ Downloaded file is empty"
+              fi
+            else
+              echo "❌ Failed to download lucky binary"
+            fi
+            
+            echo "========================================="
+            # ========== 结束 lucky 替换 ==========
+
+            # 原来的固件移动逻辑
             for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
               EXT=$(basename $FILE | cut -d '.' -f 2-)
               NAME=$(basename $FILE | cut -d '.' -f 1 | grep -io "\($WRT_TARGET\).*")
