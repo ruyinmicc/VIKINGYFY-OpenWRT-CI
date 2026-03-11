@@ -1,3 +1,10 @@
+# 全局优化
+CONFIG_ALL_KMODS=n                
+#必须关闭！避免模块爆炸
+CONFIG_ALL_NONSHARED=n
+# 启用 ccache（加速二次编译）
+CONFIG_CCACHE=y
+CONFIG_CCACHE_DIR=".ccache"
 #增加插件
 CONFIG_PACKAGE_luci-app-autoreboot=y
 CONFIG_PACKAGE_luci-app-partexp=y
