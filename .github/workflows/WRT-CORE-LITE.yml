@@ -112,7 +112,7 @@ jobs:
       - name: Check Caches
         id: check-cache
         if: env.WRT_TEST != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@main
         with:
           key: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}-${{env.WRT_HASH}}
           restore-keys: ${{env.WRT_CONFIG}}-${{env.WRT_INFO}}
