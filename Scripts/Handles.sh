@@ -107,3 +107,50 @@ if [ -d *"luci-app-netspeedtest"* ]; then
 
 	cd $PKG_PATH && echo "netspeedtest has been fixed!"
 fi
+
+# === 替换 luci-app-lucky 的 lucky 二进制 ===
+LUCKY_PKG=$(find . -maxdepth 1 -type d -name "*luci-app-lucky*" | head -n1)
+LOCAL_LUCKY="$GITHUB_WORKSPACE/Custom/lucky/aarch64_cortex-a53/lucky"
+
+if [ -n "$LUCKY_PKG" ] && [ -f "$LOCAL_LUCKY" ]; then
+    echo "🔧 Found luci-app-lucky at: $LUCKY_PKG"
+    echo "📦 Replacing lucky binary with local version..."
+
+    # 创建目标目录（标准 OpenWrt 路径）
+    mkdir -p "$LUCKY_PKG/files/usr/bin"
+
+    # 复制你的 lucky 二进制（保留原始权限）
+    cp "$LOCAL_LUCKY" "$LUCKY_PKG/files/usr/bin/lucky"
+
+    # 设置可执行权限（关键！）
+    chmod +x "$LUCKY_PKG/files/usr/bin/lucky"
+
+    # （可选）验证架构
+    if command -v file >/dev/null; then
+        ARCH=$(file "$LOCAL_LUCKY" | grep -o 'aarch64\|ARM aarch64')
+        if [ -z "$ARCH" ]; then
+            echo "⚠️ Warning: lucky may not be aarch64! Check architecture."
+        else
+            echo "✅ Architecture check passed: aarch64"
+        fi
+    fi
+
+    # 🛑 关键：禁用原插件的编译逻辑（防止被覆盖）
+    # 查找并删除 Makefile 中的 Build/Compile 部分
+    MAKEFILE="$LUCKY_PKG/Makefile"
+    if [ -f "$MAKEFILE" ]; then
+        # 删除所有与 "Build/Compile" 或 "lucky" 相关的编译段
+        sed -i '/Build\/Compile/,/^define/d' "$MAKEFILE"
+        sed -i '/lucky/d' "$MAKEFILE"
+        echo "🚫 Disabled original compilation of lucky to prevent overwrite"
+    fi
+
+    echo "✅ Successfully replaced /usr/bin/lucky in luci-app-lucky"
+else
+    if [ -z "$LUCKY_PKG" ]; then
+        echo "❌ luci-app-lucky not found in package/"
+    fi
+    if [ ! -f "$LOCAL_LUCKY" ]; then
+        echo "❌ Local lucky binary not found at $LOCAL_LUCKY"
+    fi
+fi
