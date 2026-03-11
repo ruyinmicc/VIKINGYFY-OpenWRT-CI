@@ -116,6 +116,21 @@ if [ -n "$LUCKY_PKG" ] && [ -f "$LOCAL_LUCKY" ]; then
     echo "🔧 Found luci-app-lucky at: $LUCKY_PKG"
     echo "📦 Replacing lucky binary with local version..."
 
+    # 防护1: 清理原文件
+    rm -f "$LUCKY_PKG/files/usr/bin/lucky"
+	
+    # 防护2:🛑 关键：禁用原插件的编译逻辑（防止被覆盖）
+    # 查找并删除 Makefile 中的 Build/Compile 部分
+    MAKEFILE="$LUCKY_PKG/Makefile"
+    if [ -f "$MAKEFILE" ]; then
+        # 删除所有与 "Build/Compile" 或 "lucky" 相关的编译段
+        sed -i '/Build\/Compile/,/^define/d' "$MAKEFILE"
+	    sed -i '/define Package\/lucky/,/^define/d' "$MAKEFILE"
+        sed -i '/lucky/d' "$MAKEFILE"
+        echo "🚫 Disabled original compilation of lucky to prevent overwrite"
+    fi
+	
+    # 防护3: 注入自定义二进制	
     # 创建目标目录（标准 OpenWrt 路径）
     mkdir -p "$LUCKY_PKG/files/usr/bin"
 
@@ -124,17 +139,7 @@ if [ -n "$LUCKY_PKG" ] && [ -f "$LOCAL_LUCKY" ]; then
 
     # 设置可执行权限（关键！）
     chmod +x "$LUCKY_PKG/files/usr/bin/lucky"
-
-    # 🛑 关键：禁用原插件的编译逻辑（防止被覆盖）
-    # 查找并删除 Makefile 中的 Build/Compile 部分
-    MAKEFILE="$LUCKY_PKG/Makefile"
-    if [ -f "$MAKEFILE" ]; then
-        # 删除所有与 "Build/Compile" 或 "lucky" 相关的编译段
-        sed -i '/Build\/Compile/,/^define/d' "$MAKEFILE"
-        sed -i '/lucky/d' "$MAKEFILE"
-        echo "🚫 Disabled original compilation of lucky to prevent overwrite"
-    fi
-
+	
     echo "✅ Successfully replaced /usr/bin/lucky in luci-app-lucky"
 else
     if [ -z "$LUCKY_PKG" ]; then
