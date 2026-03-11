@@ -107,3 +107,52 @@ if [ -d *"luci-app-netspeedtest"* ]; then
 
 	cd $PKG_PATH && echo "netspeedtest has been fixed!"
 fi
+
+# === 从 HTTP 下载并替换 luci-app-lucky 的 lucky 二进制（简洁版，确保文件名为 lucky） ===
+LUCKY_PKG=$(find . -maxdepth 1 -type d -name "*luci-app-lucky*" | head -n1)
+LUCKY_DOWNLOAD_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
+TEMP_LUCKY="/tmp/lucky_download_temp"
+
+if [ -z "$LUCKY_PKG" ]; then
+    echo "❌ luci-app-lucky not found"
+    exit 1
+fi
+
+echo "🔧 Found luci-app-lucky at: $LUCKY_PKG"
+echo "📦 Downloading lucky binary..."
+
+# 下载并验证
+if curl -L --retry 3 --retry-delay 5 -o "$TEMP_LUCKY" "$LUCKY_DOWNLOAD_URL" && [ -s "$TEMP_LUCKY" ]; then
+    
+    # 验证 ELF 格式
+    if ! file "$TEMP_LUCKY" | grep -q "ELF"; then
+        echo "❌ Invalid binary format"
+        rm -f "$TEMP_LUCKY"
+        exit 1
+    fi
+    
+    # 替换二进制 - 确保文件名是 lucky
+    rm -f "$LUCKY_PKG/files/usr/bin/lucky"
+    mkdir -p "$LUCKY_PKG/files/usr/bin"
+    cp "$TEMP_LUCKY" "$LUCKY_PKG/files/usr/bin/lucky"
+    chmod +x "$LUCKY_PKG/files/usr/bin/lucky"
+    
+    # 验证文件名
+    if [ -f "$LUCKY_PKG/files/usr/bin/lucky" ]; then
+        echo "✅ Binary successfully installed as: $(ls -la "$LUCKY_PKG/files/usr/bin/lucky")"
+    else
+        echo "❌ Failed to install binary as 'lucky'"
+        exit 1
+    fi
+    
+    # 禁用编译
+    sed -i '/^define Build\/Compile/,/^endef/d' "$LUCKY_PKG/Makefile"
+    echo -e "\ndefine Build/Compile\n\ttrue\nendef" >> "$LUCKY_PKG/Makefile"
+    
+    rm -f "$TEMP_LUCKY"
+    echo "✅ Successfully replaced lucky binary (saved as 'lucky')"
+else
+    echo "❌ Download failed"
+    rm -f "$TEMP_LUCKY"
+    exit 1
+fi
