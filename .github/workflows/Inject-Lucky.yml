@@ -1,172 +1,78 @@
-name: Inject Lucky via fwtool (Universal Sysupgrade)
+name: Inject Lucky into IPQ60xx Sysupgrade
 
 on:
   workflow_dispatch:
     inputs:
-      release_tags:
-        description: '输入 Release Tag（一行一个）'
+      release_tag:
+        description: 'Release Tag (e.g., main-26.03.11-23.53.36)'
         required: true
         type: string
+      lucky_url:
+        description: 'URL to aarch64 lucky binary'
+        required: false
+        type: string
+        default: "http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
 
 jobs:
   inject-lucky:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y squashfs-tools curl jq xxd
+      - uses: actions/checkout@v4
 
-      - name: Install OpenWrt fwtool
-        run: |
-          # 下载官方 fwtool.sh 脚本（纯 Bash，无编译依赖）
-          curl -L https://raw.githubusercontent.com/openwrt/openwrt/master/scripts/fwtool.sh -o fwtool.sh
-          chmod +x fwtool.sh
-          sudo mv fwtool.sh /usr/local/bin/fwtool
-          echo "✅ fwtool installed"
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y binutils squashfs-tools cpio gzip jq
 
-      - name: Process Sysupgrade Firmware with fwtool
+      - name: Download Lucky binary
+        env:
+          LUCKY_URL: ${{ github.event.inputs.lucky_url }}
+        run: |
+          mkdir -p lucky
+          curl -fL "$LUCKY_URL" -o lucky/lucky
+          chmod +x lucky/lucky
+          file lucky/lucky | grep -q "aarch64" || { echo "Not aarch64!"; exit 1; }
+
+      - name: Download firmware by tag
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${RELEASE_TAG}"
+          OWNER="VIKINGYFY"
+          REPO="OpenWRT-CI"
+          RELEASE_INFO=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$OWNER/$REPO/releases/tags/$TAG")
+          ASSET_NAME=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name | test("ipq60xx.*sysupgrade.*\\.bin$"; "i")) .name' | head -n1)
+          [ -n "$ASSET_NAME" ] || { echo "Firmware not found"; exit 1; }
+          wget -O firmware.bin "https://github.com/$OWNER/$REPO/releases/download/$TAG/$ASSET_NAME"
+
+      - name: Inject Lucky
         run: |
           set -eo pipefail
-          mkdir -p output
+          mkdir -p output work && cp firmware.bin lucky/ work/
+          cd work
+          OFFSET=$(grep -a -b -o 'TRAILER!!!' firmware.bin | head -n1 | cut -d: -f1)
+          [ -n "$OFFSET" ] || { echo "Invalid sysupgrade"; exit 1; }
+          tail -c +$((OFFSET + 10)) firmware.bin | gunzip | cpio -i
+          unsquashfs root.squashfs
+          cp lucky/lucky squashfs-root/usr/bin/ && chmod +x squashfs-root/usr/bin/lucky
+          cat > squashfs-root/etc/init.d/lucky << 'EOF'
+#!/bin/sh /etc/rc.common
+START=99
+USE_PROCD=1
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/lucky
+    procd_set_param respawn
+    procd_close_instance
+}
+EOF
+          chmod +x squashfs-root/etc/init.d/lucky
+          ln -sf ../init.d/lucky squashfs-root/etc/rc.d/S99lucky
+          mksquashfs squashfs-root/ new-root.squashfs -comp xz -noappend -always-use-fragments
+          find . -maxdepth 1 -type f ! -name "root.squashfs" ! -name "squashfs-root" ! -name "lucky" ! -name "*.bin" -print0 | cpio -o -H newc --null | gzip -9 > new.cpio.gz
+          dd if=firmware.bin bs=1 count="$OFFSET" of=header.bin 2>/dev/null
+          cat header.bin new.cpio.gz > "../output/${FIRMWARE%.bin}-lucky.bin"
 
-          mapfile -t TAGS <<< "${{ inputs.release_tags }}"
-          for TAG in "${TAGS[@]}"; do
-            TAG=$(echo "$TAG" | xargs)
-            [ -z "$TAG" ] && continue
-
-            echo ""
-            echo "========================================="
-            echo "📦 处理 Release: $TAG"
-            echo "========================================="
-
-            WORK_DIR="work_$(date +%s)_$$"
-            mkdir -p "$WORK_DIR"
-            cd "$WORK_DIR"
-
-            # 获取 release 信息
-            RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
-            HTTP_CODE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -o release.json "$RELEASE_URL" -w "%{http_code}")
-
-            if [ "$HTTP_CODE" != "200" ]; then
-              echo "❌ API 请求失败 (HTTP $HTTP_CODE)"
-              cat release.json 2>/dev/null || echo "(无响应内容)"
-              cd .. && rm -rf "$WORK_DIR"
-              continue
-            fi
-
-            # 🔍 仅处理 sysupgrade 固件（安全 jq）
-            jq -r '
-              if has("assets") and (.assets | type == "array") then
-                .assets[] |
-                select(type == "object") |
-                select(has("name") and has("browser_download_url")) |
-                select(.name | endswith(".bin") and contains("sysupgrade")) |
-                .browser_download_url
-              else
-                empty
-              end
-            ' release.json | while IFS= read -r URL; do
-              [ -z "$URL" ] && continue
-
-              FILENAME=$(basename "$URL")
-              echo "📥 下载 sysupgrade 固件: $FILENAME"
-              if ! curl -L -s -o "$FILENAME" "$URL" || [ ! -s "$FILENAME" ]; then
-                echo "⚠️ 下载失败"
-                continue
-              fi
-
-              echo "🔧 使用 fwtool 解包固件..."
-
-              # === 1. 解包 sysupgrade 镜像 ===
-              if ! fwtool -x "$FILENAME"; then
-                echo "  ❌ fwtool 解包失败（可能不是 TRX 格式）"
-                rm -f "$FILENAME"
-                continue
-              fi
-
-              # 检查是否生成了 root.squashfs
-              if [ ! -f "root.squashfs" ]; then
-                echo "  ❌ 未找到 root.squashfs（可能为 initramfs 或其他格式）"
-                rm -f "$FILENAME" kernel.bin 2>/dev/null
-                continue
-              fi
-
-              # === 2. 解包 rootfs ===
-              rm -rf squashfs-root
-              if ! unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1; then
-                echo "  ⚠️ 解包 squashfs 失败"
-                rm -f "$FILENAME" kernel.bin root.squashfs
-                continue
-              fi
-
-              # === 3. 注入 lucky ===
-              echo "  🌐 下载 lucky..."
-              LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
-              if ! curl -L --retry 3 -s -o /tmp/lucky_custom "$LUCKY_URL" || [ ! -s /tmp/lucky_custom ]; then
-                echo "  ❌ lucky 下载失败"
-                rm -f "$FILENAME" kernel.bin root.squashfs
-                continue
-              fi
-              chmod 755 /tmp/lucky_custom
-
-              mkdir -p squashfs-root/usr/bin
-              cp /tmp/lucky_custom squashfs-root/usr/bin/lucky
-              chmod 755 squashfs-root/usr/bin/lucky
-              echo "  ✅ lucky 已注入"
-
-              # === 4. 重打包 rootfs（保留原始参数）===
-              COMP=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
-              BLOCK=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
-              [ -z "$COMP" ] && COMP="xz"
-              [ -z "$BLOCK" ] && BLOCK="262144"
-
-              mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend -quiet
-
-              ORIG_ROOT_SIZE=$(stat -c%s root.squashfs)
-              NEW_ROOT_SIZE=$(stat -c%s new-root.squashfs)
-              if [ $NEW_ROOT_SIZE -gt $ORIG_ROOT_SIZE ]; then
-                echo "  ⚠️ 新 rootfs 大了 $(($NEW_ROOT_SIZE - $ORIG_ROOT_SIZE)) 字节"
-              fi
-
-              # === 5. 重新构建 sysupgrade 镜像 ===
-              if ! fwtool -b -k kernel.bin -r new-root.squashfs -o "lucky-$FILENAME"; then
-                echo "  ❌ fwtool 重打包失败"
-                rm -f "$FILENAME" kernel.bin root.squashfs new-root.squashfs
-                continue
-              fi
-
-              if [ -s "lucky-$FILENAME" ]; then
-                cp "lucky-$FILENAME" "$GITHUB_WORKSPACE/output/"
-                echo "  ✅ 生成注入固件: lucky-$FILENAME"
-              else
-                echo "  ❌ 生成的固件为空"
-              fi
-
-              # === 清理 ===
-              rm -f "$FILENAME" kernel.bin root.squashfs new-root.squashfs /tmp/lucky_custom
-              rm -rf squashfs-root
-            done
-
-            cd ..
-            rm -rf "$WORK_DIR"
-          done
-
-      - name: Upload Injected Sysupgrade Firmwares
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: lucky-sysupgrade-firmwares-fwtool
+          name: lucky-firmware
           path: output/
-          retention-days: 7
-          if-no-files-found: warn
-
-      - name: Final Summary
-        run: |
-          COUNT=$(ls output/ 2>/dev/null | wc -l)
-          if [ "$COUNT" -gt 0 ]; then
-            echo "✅ 成功生成 $COUNT 个注入版 sysupgrade 固件（使用 fwtool）"
-          else
-            echo "❌ 未生成任何固件"
-            exit 1
-          fi
