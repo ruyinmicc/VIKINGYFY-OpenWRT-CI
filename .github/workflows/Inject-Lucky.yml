@@ -56,38 +56,37 @@ jobs:
                 echo "⚠️ 固件下载失败"
                 continue
               fi
-
               echo ""
               echo "🔧 尝试注入 lucky 到: $FILENAME"
 
-              # === 🔍 使用 binwalk 提取 squashfs（核心修复）===
-              echo "  🔍 使用 binwalk 分析固件结构..."
-              if ! binwalk -t "$FILENAME" 2>/dev/null | grep -q -i "squashfs"; then
+              # === ⚡ 第一步：快速扫描并获取 squashfs 偏移 ===
+              echo "  ⚡ 快速扫描 Squashfs 偏移（跳过熵分析）..."
+              BINWALK_SCAN=$(timeout 15 binwalk -y Squashfs --no-entropy "$FILENAME" 2>/dev/null | grep -i "squashfs" | head -1)
+              if [ -z "$BINWALK_SCAN" ]; then
                 echo "  ⚠️ binwalk 未检测到 Squashfs 文件系统"
                 rm -f "$FILENAME"
                 continue
               fi
 
-              BINWALK_DIR="bw_extract_$$"
+              OFFSET_HEX=$(echo "$BINWALK_SCAN" | awk '{print $1}')
+              OFFSET_DEC=$((16#$OFFSET_HEX))
+              echo "  📍 检测到 squashfs 偏移: $OFFSET_DEC (0x$OFFSET_HEX)"
+
+              # === ⚡ 第二步：高速提取 squashfs ===
+              BINWALK_DIR="bw_fast_$$"
               mkdir -p "$BINWALK_DIR"
-              echo "  💾 正在提取 squashfs..."
-              if ! binwalk -e -C "$BINWALK_DIR" "$FILENAME" >/dev/null 2>&1; then
-                echo "  ⚠️ binwalk 提取失败"
+              echo "  💾 高速提取 squashfs (仅目标文件系统)..."
+              
+              if ! timeout 30 binwalk -e -y Squashfs --no-entropy --run-as=root -C "$BINWALK_DIR" "$FILENAME" >/dev/null 2>&1; then
+                echo "  ⚠️ binwalk 提取超时或失败"
                 rm -rf "$BINWALK_DIR" "$FILENAME"
                 continue
               fi
 
-              # 查找提取出的 squashfs 文件
-              SQUASH_FILE=""
-              while IFS= read -r -d '' file; do
-                if file "$file" 2>/dev/null | grep -q -i "squashfs"; then
-                  SQUASH_FILE="$file"
-                  break
-                fi
-              done < <(find "$BINWALK_DIR" -type f -print0 2>/dev/null)
-
+              # 查找提取出的 .squashfs 文件
+              SQUASH_FILE=$(find "$BINWALK_DIR" -type f -name "*.squashfs" | head -1)
               if [ -z "$SQUASH_FILE" ] || [ ! -s "$SQUASH_FILE" ]; then
-                echo "  ⚠️ 未找到有效的 squashfs 文件"
+                echo "  ⚠️ 未找到有效的 .squashfs 文件"
                 rm -rf "$BINWALK_DIR" "$FILENAME"
                 continue
               fi
@@ -105,7 +104,7 @@ jobs:
               fi
               echo "  📂 成功解包 rootfs"
 
-              # === 🌐 动态下载 lucky（仅在此时）===
+              # === 🌐 动态下载 lucky ===
               echo "  🌐 下载 lucky..."
               LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
               if ! curl -L --retry 3 -s -o /tmp/lucky_custom "$LUCKY_URL" || [ ! -s /tmp/lucky_custom ]; then
@@ -136,19 +135,7 @@ jobs:
                 echo "  ⚠️ 新镜像大了 $(($NEW_SIZE - ORIG_SIZE)) 字节！可能无法刷写！"
               fi
 
-              # === 🔗 拼接新固件 ===
-              # 找到原始 squashfs 在固件中的偏移（用于拼接头部）
-              OFFSET_HEX=$(binwalk "$FILENAME" 2>/dev/null | grep -i "squashfs" | head -1 | awk '{print $1}')
-              if [ -z "$OFFSET_HEX" ]; then
-                echo "  ⚠️ 无法获取 squashfs 偏移，跳过拼接"
-                rm -f "$FILENAME" root.squashfs new-root.squashfs /tmp/lucky_custom
-                continue
-              fi
-
-              OFFSET_DEC=$((16#$OFFSET_HEX))
-              echo "  📍 使用 binwalk 偏移: $OFFSET_DEC (0x$OFFSET_HEX)"
-
-              # 提取头部并拼接
+              # === 🔗 拼接新固件（使用已缓存的 OFFSET_DEC）===
               dd if="$FILENAME" of="lucky-$FILENAME" bs=1 count="$OFFSET_DEC" status=none 2>/dev/null
               cat new-root.squashfs >> "lucky-$FILENAME"
 
@@ -159,14 +146,9 @@ jobs:
                 echo "  ⚠️ 新固件为空"
               fi
 
-              # === 🧹 清理 ===
+              # === 🧹 清理临时文件 ===
               rm -f "$FILENAME" root.squashfs new-root.squashfs "lucky-$FILENAME" /tmp/lucky_custom
               rm -rf squashfs-root
-            done
-
-            cd ..
-            rm -rf "$WORK_DIR"
-          done
 
       - name: Upload Injected Firmwares
         uses: actions/upload-artifact@v4
