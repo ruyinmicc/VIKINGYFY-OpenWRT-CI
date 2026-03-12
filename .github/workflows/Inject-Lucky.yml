@@ -1,4 +1,4 @@
-name: Inject Lucky into OpenWrt Releases (Universal)
+name: Inject Lucky into OpenWrt Releases (Stable & Universal)
 
 on:
   workflow_dispatch:
@@ -30,7 +30,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools curl jq xxd
+          sudo apt-get install -y squashfs-tools curl jq
 
       - name: Download Lucky Binary
         run: |
@@ -64,7 +64,7 @@ jobs:
 
       - name: Process Each Release
         run: |
-          set -eo pipefail  # 安全退出，但我们在关键步骤显式检查
+          set -eo pipefail
           mkdir -p output
           SUCCESS_COUNT=0
           FAIL_COUNT=0
@@ -115,26 +115,32 @@ jobs:
               echo ""
               echo "🔧 正在注入 lucky 到: $FW"
 
-              # === 查找 squashfs 签名 (限前 256MB) ===
-              echo "🔍 搜索 squashfs 签名 (hsqs/sqsh)，限前 256MB..."
-              HEX_STREAM=$(head -c 268435456 "$FW" | xxd -p | tr -d '\n')
-              
-              HSQS_POS=$(echo "$HEX_STREAM" | grep -bo '68737173' | head -1 | cut -d: -f1)
-              SQSH_POS=$(echo "$HEX_STREAM" | grep -bo '73717368' | head -1 | cut -d: -f1)
+              # === 🔍 二进制搜索 squashfs 签名（关键修复！）===
+              echo "🔍 搜索 squashfs 签名 (hsqs/sqsh)..."
+              OFFSET=""
 
-              if [ -n "$HSQS_POS" ]; then
-                OFFSET=$((HSQS_POS / 2))
-              elif [ -n "$SQSH_POS" ]; then
-                OFFSET=$((SQSH_POS / 2))
-              else
-                echo "  ⚠️ 未找到 squashfs 签名"
+              # 读取前 256MB 数据（高效、低内存）
+              if [ -s "$FW" ]; then
+                # 使用 dd 限制读取范围，避免大文件问题
+                HSQS_OFF=$(dd if="$FW" bs=1M count=256 2>/dev/null | grep -aob $'\x68\x73\x71\x73' | head -1 | cut -d: -f1)
+                SQSH_OFF=$(dd if="$FW" bs=1M count=256 2>/dev/null | grep -aob $'\x73\x71\x73\x68' | head -1 | cut -d: -f1)
+
+                if [ -n "$HSQS_OFF" ]; then
+                  OFFSET=$HSQS_OFF
+                elif [ -n "$SQSH_OFF" ]; then
+                  OFFSET=$SQSH_OFF
+                fi
+              fi
+
+              if [ -z "$OFFSET" ]; then
+                echo "  ⚠️ 未找到 squashfs 签名 (hsqs/sqsh)"
                 continue
               fi
 
               OFFSET_HEX=$(printf "%08x" $OFFSET)
               echo "  📍 找到 squashfs 偏移: $OFFSET (0x$OFFSET_HEX)"
 
-              # === 高效提取 squashfs (通用对齐处理) ===
+              # === 💾 高效提取 squashfs（通用对齐处理）===
               BLOCK_SIZE=1048576  # 1MB
               SKIP_BLOCKS=$((OFFSET / BLOCK_SIZE))
               REMAINDER=$((OFFSET % BLOCK_SIZE))
@@ -147,7 +153,7 @@ jobs:
                 dd bs=1 skip=$REMAINDER status=none 2>/dev/null > root.squashfs
               fi
 
-              # === 验证提取结果 ===
+              # === ✅ 验证提取结果 ===
               if [ ! -s root.squashfs ]; then
                 echo "  ⚠️ 提取的 squashfs 为空或未生成"
                 continue
@@ -156,31 +162,31 @@ jobs:
               if ! unsquashfs -s root.squashfs >/dev/null 2>&1; then
                 echo "  ⚠️ 提取内容不是有效的 squashfs"
                 echo "      大小: $(stat -c%s root.squashfs) B"
-                echo "      头部: $(hexdump -C root.squashfs | head -n1)"
+                hexdump -C root.squashfs | head -n2
                 continue
               fi
 
-              # === 解包 ===
+              # === 📦 解包 ===
               rm -rf squashfs-root
               if ! unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1; then
                 echo "  ⚠️ 解包失败"
                 continue
               fi
 
-              # === 注入 lucky ===
+              # === 🧬 注入 lucky ===
               mkdir -p squashfs-root/usr/bin
               cp "$GITHUB_WORKSPACE/lucky_custom" squashfs-root/usr/bin/lucky
               chmod 755 squashfs-root/usr/bin/lucky
               echo "  ✅ lucky 已注入到 /usr/bin/lucky"
 
-              # === 获取原始压缩参数 ===
+              # === 🛠️ 获取原始压缩参数 ===
               COMP=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
               BLOCK=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
               [ -z "$COMP" ] && COMP="xz"
               [ -z "$BLOCK" ] && BLOCK="262144"
               echo "  🛠️ 使用压缩: $COMP, 块大小: ${BLOCK}B"
 
-              # === 重打包 ===
+              # === 🔄 重打包 ===
               rm -f new-root.squashfs
               if ! mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend -quiet; then
                 echo "  ⚠️ 重打包失败"
@@ -194,7 +200,7 @@ jobs:
                 echo "  ⚠️ 新镜像大了 $(($NEW_SIZE - ORIG_SIZE)) 字节！可能无法刷写！"
               fi
 
-              # === 拼接新固件 ===
+              # === 🔗 拼接新固件 ===
               NEW_FW="lucky-$FW"
               echo "  🔧 拼接固件头部 ($OFFSET 字节)..."
               if [ $REMAINDER -eq 0 ]; then
@@ -216,7 +222,7 @@ jobs:
                 echo "  ⚠️ 新固件为空"
               fi
 
-              # === 清理 ===
+              # === 🧹 清理 ===
               rm -f root.squashfs new-root.squashfs "$NEW_FW"
               rm -rf squashfs-root
             done
