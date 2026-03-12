@@ -25,12 +25,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@main
+        uses: actions/checkout@v4
 
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools curl jq file
+          sudo apt-get install -y squashfs-tools curl jq file binwalk
 
       - name: Download Lucky Binary
         run: |
@@ -39,46 +39,35 @@ jobs:
           chmod 755 lucky_custom
           echo "LUCKY_SIZE=$(du -h lucky_custom | cut -f1)" >> $GITHUB_ENV
           echo "LUCKY_SHA256=$(sha256sum lucky_custom | cut -d' ' -f1)" >> $GITHUB_ENV
-          echo "✅ Lucky binary downloaded: $(file lucky_custom)"
+          echo "✅ Lucky binary downloaded: $(file lucky_custom | cut -d: -f2-)"
 
       - name: Parse Release Tags
         id: parse
         run: |
           echo "📋 将要处理的 Release Tags："
           echo "================================"
-          
           TAGS=$(echo '${{ inputs.release_tags }}' | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-          
-          echo "$TAGS" | while read tag; do
+          echo "$TAGS" | while IFS= read -r tag; do
             [ -n "$tag" ] && echo "  • $tag"
           done
-          
           COUNT=$(echo "$TAGS" | grep -v '^$' | wc -l)
           echo "================================"
           echo "🔢 总共 $COUNT 个 Release 待处理"
-          
-          echo "tags<<EOF" >> $GITHUB_OUTPUT
-          echo "$TAGS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+            echo "count=$COUNT"
+          } >> $GITHUB_OUTPUT
 
       - name: Set Firmware Filter
         id: filter
         run: |
           case "${{ inputs.firmware_filter }}" in
-            "sysupgrade only")
-              echo "pattern=sysupgrade" >> $GITHUB_OUTPUT
-              echo "desc=仅处理 sysupgrade 固件" >> $GITHUB_OUTPUT
-              ;;
-            "factory only")
-              echo "pattern=factory" >> $GITHUB_OUTPUT
-              echo "desc=仅处理 factory 固件" >> $GITHUB_OUTPUT
-              ;;
-            *)
-              echo "pattern=.*" >> $GITHUB_OUTPUT
-              echo "desc=处理所有固件" >> $GITHUB_OUTPUT
-              ;;
-          esac
+            "sysupgrade only") echo "pattern=sysupgrade"; echo "desc=仅处理 sysupgrade 固件" ;;
+            "factory only")   echo "pattern=factory";   echo "desc=仅处理 factory 固件" ;;
+            *)                echo "pattern=.*";        echo "desc=处理所有固件" ;;
+          esac >> $GITHUB_OUTPUT
           echo "🔍 过滤规则：${{ steps.filter.outputs.desc }}"
 
       - name: Process Each Release
@@ -87,140 +76,170 @@ jobs:
           SUCCESS_COUNT=0
           FAIL_COUNT=0
           TOTAL_INJECTED=0
-          
+
           mapfile -t TAGS <<< "${{ steps.parse.outputs.tags }}"
-          
           for TAG in "${TAGS[@]}"; do
             [ -z "$TAG" ] && continue
-            
             echo ""
             echo "========================================="
             echo "📦 开始处理 Release: $TAG"
             echo "========================================="
-            
-            WORK_DIR="temp_$(echo "$TAG" | tr '/' '_' | tr '.' '_')"
+
+            WORK_DIR="temp_$(echo "$TAG" | tr '/.' '_' | tr '-' '_')"
             mkdir -p "$WORK_DIR"
             cd "$WORK_DIR"
-            
-            echo "📥 正在下载固件..."
+
+            # 获取 release 信息
             RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
-            
-            HTTP_RESPONSE=$(curl -s -w "%{http_code}" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            HTTP_CODE=$(curl -s -w "%{http_code}" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -o release_info.json "$RELEASE_URL")
             
-            if [ "$HTTP_RESPONSE" != "200" ]; then
-              echo "❌ Release 不存在或无法访问: $TAG"
-              cd ..
-              rm -rf "$WORK_DIR"
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "❌ Release 不存在或无权限访问"
+              cd .. && rm -rf "$WORK_DIR"
               FAIL_COUNT=$((FAIL_COUNT + 1))
               continue
             fi
-            
-            # 下载固件
+
+            # 下载匹配固件
             PATTERN="${{ steps.filter.outputs.pattern }}"
-            ASSETS=$(jq -r ".assets[] | select(.name | test(\".*($PATTERN).*\\.(bin|ubi)\$\")) | .browser_download_url" release_info.json)
-            
-            FIRMWARE_COUNT=0
-            for URL in $ASSETS; do
-              FILENAME=$(basename "$URL")
-              echo "  ⏳ 下载: $FILENAME"
-              if curl -L -s -o "$FILENAME" "$URL"; then
-                echo "  ✅ 下载成功"
-                FIRMWARE_COUNT=$((FIRMWARE_COUNT + 1))
-              else
-                echo "  ❌ 下载失败"
-              fi
-            done
-            
-            if [ $FIRMWARE_COUNT -eq 0 ]; then
-              echo "⚠️ 没有找到符合条件的固件"
-              cd ..
-              rm -rf "$WORK_DIR"
+            ASSETS=$(jq -r ".assets[] | select(.name | test(\".*($PATTERN).*\\\\.(bin|ubi)$\")) | .browser_download_url" release_info.json)
+            if [ -z "$ASSETS" ]; then
+              echo "⚠️ 未找到匹配固件"
+              cd .. && rm -rf "$WORK_DIR"
               continue
             fi
-            
-            echo "✅ 下载完成，共 $FIRMWARE_COUNT 个固件"
-            
-            # 处理每个固件 - 这里添加实际的注入逻辑
+
+            FIRMWARE_COUNT=0
+            for URL in $ASSETS; do
+              [ -z "$URL" ] && continue
+              FILENAME=$(basename "$URL")
+              echo "📥 下载: $FILENAME"
+              if curl -L -s -o "$FILENAME" "$URL" && [ -s "$FILENAME" ]; then
+                FIRMWARE_COUNT=$((FIRMWARE_COUNT + 1))
+              else
+                echo "  ❌ 下载失败或为空"
+              fi
+            done
+
+            if [ $FIRMWARE_COUNT -eq 0 ]; then
+              cd .. && rm -rf "$WORK_DIR"
+              continue
+            fi
+
+            # 启用 nullglob 避免 *.bin 字面返回
+            shopt -s nullglob
             INJECT_COUNT=0
             for FW in *.bin *.ubi; do
-              [ ! -f "$FW" ] && continue
-              
+              [ -f "$FW" ] || continue
               echo ""
-              echo "  🔧 正在注入 lucky 到: $FW"
-              echo "  📊 文件大小: $(du -h "$FW" | cut -f1)"
-              
-              # 查找 squashfs 签名
-              SIGNATURE=$(grep -F -a -b -o -e 'hsqs' -e 'sqsh' -e 'hsq#' "$FW" 2>/dev/null | head -1)
-              
-              if [ -z "$SIGNATURE" ]; then
-                echo "  ⚠️ 未找到 squashfs 签名，跳过"
+              echo "🔧 正在注入 lucky 到: $FW"
+
+              # 使用 binwalk 提取 squashfs
+              echo "🔍 使用 binwalk 分析固件..."
+              if ! binwalk -e --run-as=root "$FW" > /dev/null 2>&1; then
+                echo "  ⚠️ binwalk 未能提取任何内容"
                 continue
               fi
-              
-              OFFSET=$(($(echo "$SIGNATURE" | awk -F: '{print $1}') - 4))
-              echo "  📍 squashfs 偏移量: $OFFSET"
-              
-              # 提取 squashfs
-              dd if="$FW" of=root.squashfs bs=$OFFSET skip=1 2>/dev/null
-              
-              # 解压 squashfs
-              if ! unsquashfs -s root.squashfs >/dev/null 2>&1; then
-                echo "  ⚠️ 无效的 squashfs 镜像，跳过"
+
+              EXTRACTED_DIR="_${FW}.extracted"
+              if [ ! -d "$EXTRACTED_DIR" ]; then
+                echo "  ⚠️ 未生成提取目录"
                 continue
               fi
-              
-              unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1
-              
-              if [ ! -d "squashfs-root" ]; then
-                echo "  ⚠️ 解压失败，跳过"
+
+              # 查找 squashfs 文件（通常为最大文件或含 .squashfs 后缀）
+              SQUASH_FILE=""
+              for f in "$EXTRACTED_DIR"/*; do
+                if [ -f "$f" ] && file "$f" | grep -q "Squashfs filesystem"; then
+                  SQUASH_FILE="$f"
+                  break
+                fi
+              done
+
+              if [ -z "$SQUASH_FILE" ]; then
+                # 尝试任意文件
+                for f in "$EXTRACTED_DIR"/*; do
+                  if [ -f "$f" ] && unsquashfs -s "$f" >/dev/null 2>&1; then
+                    SQUASH_FILE="$f"
+                    break
+                  fi
+                done
+              fi
+
+              if [ -z "$SQUASH_FILE" ]; then
+                echo "  ⚠️ 未找到有效的 squashfs 镜像"
                 continue
               fi
-              
-              # 创建 /usr/bin 目录（如果不存在）
+
+              echo "  ✅ 找到 squashfs: $(basename "$SQUASH_FILE")"
+
+              # 解包
+              unsquashfs -d squashfs-root "$SQUASH_FILE" >/dev/null 2>&1
+              if [ ! -d squashfs-root ]; then
+                echo "  ⚠️ 解包失败"
+                continue
+              fi
+
+              # 注入 lucky
               mkdir -p squashfs-root/usr/bin
-              
-              # 复制 lucky 到固件
               cp "$GITHUB_WORKSPACE/lucky_custom" squashfs-root/usr/bin/lucky
               chmod 755 squashfs-root/usr/bin/lucky
-              
-              echo "  ✅ lucky 已添加到 /usr/bin/lucky"
-              
-              # 重新打包 squashfs
-              mksquashfs squashfs-root new-root.squashfs -comp xz -b 262144 >/dev/null 2>&1
-              
-              if [ ! -f "new-root.squashfs" ]; then
-                echo "  ⚠️ 重新打包失败，跳过"
+              echo "  ✅ lucky 已注入"
+
+              # 获取原始压缩参数（尽量保持一致）
+              COMP=$(unsquashfs -s "$SQUASH_FILE" 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
+              BLOCK=$(unsquashfs -s "$SQUASH_FILE" 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
+              [ -z "$COMP" ] && COMP="xz"
+              [ -z "$BLOCK" ] && BLOCK="262144"
+
+              # 重打包
+              mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend >/dev/null 2>&1
+              if [ ! -f new-root.squashfs ]; then
+                echo "  ⚠️ 重打包失败"
                 continue
               fi
-              
-              # 创建新固件
+
+              ORIG_SIZE=$(stat -c%s "$SQUASH_FILE")
+              NEW_SIZE=$(stat -c%s new-root.squashfs)
+              if [ $NEW_SIZE -gt $ORIG_SIZE ]; then
+                echo "  ⚠️ 新 squashfs 比原镜像大 $(($NEW_SIZE - ORIG_SIZE)) 字节！可能无法刷写！"
+              fi
+
+              # 获取 squashfs 在原固件中的偏移（从 binwalk 日志）
+              OFFSET_LINE=$(binwalk "$FW" | grep -i squashfs | head -1)
+              if [ -n "$OFFSET_LINE" ]; then
+                OFFSET=$(echo "$OFFSET_LINE" | awk '{print $1}')
+              else
+                # fallback: use file size difference (less reliable)
+                OFFSET=$(( $(stat -c%s "$FW") - $(stat -c%s "$SQUASH_FILE") ))
+              fi
+
+              # 拼接新固件：头部 + 新 rootfs
               NEW_FW="lucky-$FW"
-              dd if="$FW" of="$NEW_FW" bs=$OFFSET count=1 2>/dev/null
+              head -c "$OFFSET" "$FW" > "$NEW_FW"
               cat new-root.squashfs >> "$NEW_FW"
-              
-              # 移动到最终输出目录
-              FINAL_NAME="${TAG}-${NEW_FW}"
-              cp "$NEW_FW" "$GITHUB_WORKSPACE/output/$FINAL_NAME"
-              
-              NEW_SIZE=$(du -h "$GITHUB_WORKSPACE/output/$FINAL_NAME" | cut -f1)
-              echo "  ✅ 注入成功: $FINAL_NAME (大小: $NEW_SIZE)"
-              
-              INJECT_COUNT=$((INJECT_COUNT + 1))
-              TOTAL_INJECTED=$((TOTAL_INJECTED + 1))
-              
-              # 清理临时文件
-              rm -f root.squashfs new-root.squashfs
-              rm -rf squashfs-root
+
+              if [ -s "$NEW_FW" ]; then
+                FINAL_NAME="${TAG//\//-}-$(basename "$NEW_FW")"
+                cp "$NEW_FW" "$GITHUB_WORKSPACE/output/$FINAL_NAME"
+                echo "  ✅ 注入成功: $FINAL_NAME"
+                INJECT_COUNT=$((INJECT_COUNT + 1))
+                TOTAL_INJECTED=$((TOTAL_INJECTED + 1))
+              else
+                echo "  ⚠️ 新固件为空"
+              fi
+
+              # 清理
+              rm -rf "$EXTRACTED_DIR" squashfs-root new-root.squashfs "$NEW_FW"
             done
-            
+
             echo "📊 Release $TAG: $INJECT_COUNT/$FIRMWARE_COUNT 固件注入成功"
-            
             cd ..
             rm -rf "$WORK_DIR"
             SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
           done
-          
+
           echo ""
           echo "========================================="
           echo "📊 处理完成统计"
@@ -228,12 +247,6 @@ jobs:
           echo "✅ 成功处理的 Release: $SUCCESS_COUNT"
           echo "❌ 失败的 Release: $FAIL_COUNT"
           echo "📦 总共注入固件: $TOTAL_INJECTED"
-          echo "📁 输出目录: output/"
-          echo ""
-          echo "📋 生成的文件:"
-          ls -la output/ | while read line; do
-            echo "  $line"
-          done
 
       - name: Upload Modified Firmwares
         uses: actions/upload-artifact@v4
@@ -241,7 +254,7 @@ jobs:
           name: lucky-injected-firmwares-${{ github.run_id }}
           path: output/*
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Create Summary
         run: |
@@ -250,12 +263,17 @@ jobs:
           echo "| 项目 | 结果 |" >> $GITHUB_STEP_SUMMARY
           echo "|------|------|" >> $GITHUB_STEP_SUMMARY
           echo "| 处理的 Release | ${{ steps.parse.outputs.count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 生成的固件数量 | $(ls output/ | wc -l) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 生成的固件数量 | $(ls output/ 2>/dev/null | wc -l) |" >> $GITHUB_STEP_SUMMARY
           echo "| Lucky 大小 | ${{ env.LUCKY_SIZE }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Lucky SHA256 | ${{ env.LUCKY_SHA256 }} |" >> $GITHUB_STEP_SUMMARY
           
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📦 生成的文件" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          ls -la output/ >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          if [ -d "output" ] && [ -n "$(ls -A output)" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📦 生成的文件" >> $GITHUB_STEP_SUMMARY
+            echo '```' >>  $GITHUB_STEP_SUMMARY
+            ls -la output/ >>  $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ 没有生成任何文件" >> $GITHUB_STEP_SUMMARY
+          fi
