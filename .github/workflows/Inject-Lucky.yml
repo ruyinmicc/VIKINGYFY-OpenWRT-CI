@@ -44,35 +44,50 @@ jobs:
           [ -n "$ASSET_NAME" ] || { echo "Firmware not found"; exit 1; }
           wget -O firmware.bin "https://github.com/$OWNER/$REPO/releases/download/$TAG/$ASSET_NAME"
 
-      - name: Inject Lucky
+      - name: Inject Lucky into firmware
         run: |
           set -eo pipefail
-          mkdir -p output work && cp firmware.bin lucky/ work/
+          FIRMWARE="firmware.bin"
+          mkdir -p output work
+          cp "$FIRMWARE" work/
+          cp -r lucky/ work/
           cd work
-          OFFSET=$(grep -a -b -o 'TRAILER!!!' firmware.bin | head -n1 | cut -d: -f1)
-          [ -n "$OFFSET" ] || { echo "Invalid sysupgrade"; exit 1; }
-          tail -c +$((OFFSET + 10)) firmware.bin | gunzip | cpio -i
+
+          OFFSET=$(grep -a -b -o 'TRAILER!!!' "$FIRMWARE" | head -n1 | cut -d: -f1)
+          [ -n "$OFFSET" ] || { echo "❌ TRAILER!!! not found"; exit 1; }
+
+          tail -c +$((OFFSET + 10)) "$FIRMWARE" | gunzip | cpio -i
+          [ -f root.squashfs ] || { echo "❌ root.squashfs missing"; exit 1; }
+
           unsquashfs root.squashfs
-          cp lucky/lucky squashfs-root/usr/bin/ && chmod +x squashfs-root/usr/bin/lucky
-          cat > squashfs-root/etc/init.d/lucky << 'EOF'
-#!/bin/sh /etc/rc.common
+          cp lucky/lucky squashfs-root/usr/bin/
+          chmod +x squashfs-root/usr/bin/lucky
+
+          # Write init script using echo (safe for YAML)
+          echo '#!/bin/sh /etc/rc.common
 START=99
 USE_PROCD=1
+
 start_service() {
     procd_open_instance
     procd_set_param command /usr/bin/lucky
     procd_set_param respawn
     procd_close_instance
-}
-EOF
+}' > squashfs-root/etc/init.d/lucky
+
           chmod +x squashfs-root/etc/init.d/lucky
           ln -sf ../init.d/lucky squashfs-root/etc/rc.d/S99lucky
+
           mksquashfs squashfs-root/ new-root.squashfs -comp xz -noappend -always-use-fragments
-          find . -maxdepth 1 -type f ! -name "root.squashfs" ! -name "squashfs-root" ! -name "lucky" ! -name "*.bin" -print0 | cpio -o -H newc --null | gzip -9 > new.cpio.gz
-          dd if=firmware.bin bs=1 count="$OFFSET" of=header.bin 2>/dev/null
+
+          find . -maxdepth 1 -type f ! -name "root.squashfs" ! -name "squashfs-root" ! -name "lucky" ! -name "*.bin" -print0 | \
+            cpio -o -H newc --null | gzip -9 > new.cpio.gz
+
+          dd if="$FIRMWARE" bs=1 count="$OFFSET" of=header.bin 2>/dev/null
           cat header.bin new.cpio.gz > "../output/${FIRMWARE%.bin}-lucky.bin"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: lucky-firmware
+          name: lucky-firmware-${{ github.event.inputs.release_tag }}
           path: output/
+          retention-days: 7
