@@ -1,16 +1,13 @@
 #!/bin/bash
 # Scripts/create-lucky-package.sh
-# 功能：在 OpenWrt 源码的 package/ 目录下创建 my-lucky 自定义包
-
-set -e  # 遇到错误立即退出
+set -e
 
 cd ./wrt/package/
 
-# 创建自定义包目录
 PKG_DIR="my-lucky"
 mkdir -p "$PKG_DIR"
 
-# 创建 Makefile（注意：EOF 必须顶格）
+# 创建 Makefile（修正 PKG_BUILD_DIR）
 cat > "$PKG_DIR/Makefile" << 'EOF'
 include $(TOPDIR)/rules.mk
 
@@ -18,7 +15,8 @@ PKG_NAME:=my-lucky
 PKG_VERSION:=20260312
 PKG_RELEASE:=1
 
-PKG_BUILD_DIR := /dev/null
+# 不要将 PKG_BUILD_DIR 设为 /dev/null，使用默认值即可
+# PKG_BUILD_DIR := /dev/null
 
 include $(INCLUDE_DIR)/package.mk
 
@@ -35,6 +33,7 @@ define Package/my-lucky/description
   It will override the version from luci-app-lucky.
 endef
 
+# 所有构建步骤都定义为空
 define Build/Prepare
 	@true
 endef
