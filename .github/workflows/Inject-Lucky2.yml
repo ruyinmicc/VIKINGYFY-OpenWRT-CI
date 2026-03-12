@@ -1,0 +1,200 @@
+      - name: Process Release and Inject Lucky
+        run: |
+          # 安装 pv 用于进度显示
+          sudo apt-get install -y pv >/dev/null 2>&1 || true
+          
+          set -eo pipefail
+          mkdir -p output
+
+          mapfile -t TAGS <<< "${{ inputs.release_tags }}"
+          
+          for TAG in "${TAGS[@]}"; do
+            TAG=$(echo "$TAG" | xargs)
+            [ -z "$TAG" ] && continue
+
+            echo ""
+            echo "========================================="
+            echo "📦 处理 Release: $TAG"
+            echo "========================================="
+
+            WORK_DIR="work_$(date +%s)_$$"
+            mkdir -p "$WORK_DIR"
+            cd "$WORK_DIR"
+
+            # 下载 release 信息
+            echo "📡 获取 release 信息..."
+            RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
+            if ! curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -o release.json "$RELEASE_URL" -w "%{http_code}" | grep -q "200"; then
+              echo "❌ Release 不存在或无权限"
+              cd .. && rm -rf "$WORK_DIR"
+              continue
+            fi
+
+            # 获取固件总数
+            TOTAL_FIRMWARES=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .name' release.json | wc -l)
+            CURRENT=0
+
+            # 遍历所有 .bin 固件
+            jq -r '.assets[] | select(.name | endswith(".bin")) | .browser_download_url' release.json | while read -r URL; do
+              [ -z "$URL" ] && continue
+              CURRENT=$((CURRENT + 1))
+              FILENAME=$(basename "$URL")
+              
+              echo ""
+              echo "─────────────────────────────────────────"
+              echo "📥 [$CURRENT/$TOTAL_FIRMWARES] 下载固件: $FILENAME"
+              echo "─────────────────────────────────────────"
+              
+              # 下载显示进度
+              curl -L --progress-bar -o "$FILENAME" "$URL"
+              
+              if [ ! -s "$FILENAME" ]; then
+                echo "⚠️ 固件下载失败"
+                continue
+              fi
+
+              echo ""
+              echo "🔧 注入 lucky 到: $FILENAME"
+              echo ""
+
+              # 搜索签名
+              echo -n "  🔍 搜索 squashfs 签名... "
+              OFFSET=""
+              if [ -s "$FILENAME" ]; then
+                HSQS_OFF=$(dd if="$FILENAME" bs=1M count=256 2>/dev/null | grep -aob $'\x68\x73\x71\x73' | head -1 | cut -d: -f1 || true)
+                SQSH_OFF=$(dd if="$FILENAME" bs=1M count=256 2>/dev/null | grep -aob $'\x73\x71\x73\x68' | head -1 | cut -d: -f1 || true)
+
+                if [ -n "$HSQS_OFF" ]; then
+                  OFFSET=$HSQS_OFF
+                  echo "✅ 找到 hsqs"
+                elif [ -n "$SQSH_OFF" ]; then
+                  OFFSET=$SQSH_OFF
+                  echo "✅ 找到 sqsh"
+                else
+                  echo "❌ 未找到"
+                  continue
+                fi
+              fi
+
+              OFFSET_HEX=$(printf "%08x" $OFFSET)
+              echo "  📍 偏移量: $OFFSET (0x$OFFSET_HEX)"
+
+              # 计算提取参数
+              BLOCK_SIZE=1048576
+              SKIP_BLOCKS=$(( ${OFFSET} / ${BLOCK_SIZE} ))
+              REMAINDER=$(( ${OFFSET} % ${BLOCK_SIZE} ))
+              : ${SKIP_BLOCKS:=0}
+              : ${REMAINDER:=0}
+
+              echo "  💾 提取 squashfs (skip=${SKIP_BLOCKS}M, offset=${REMAINDER}B)"
+
+              # 提取 squashfs（带进度）
+              if command -v pv >/dev/null 2>&1; then
+                # 使用 pv 显示进度
+                EXTRACT_SIZE=$(($(stat -c%s "$FILENAME") - OFFSET))
+                if [ "$REMAINDER" -eq 0 ]; then
+                  dd if="$FILENAME" bs=1M skip="$SKIP_BLOCKS" 2>/dev/null | \
+                    pv -s "$EXTRACT_SIZE" -N "  提取" > root.squashfs
+                else
+                  dd if="$FILENAME" bs=1M skip="$SKIP_BLOCKS" 2>/dev/null | \
+                    dd bs=1 skip="$REMAINDER" 2>/dev/null | \
+                    pv -s "$EXTRACT_SIZE" -N "  提取" > root.squashfs
+                fi
+              else
+                # 使用 dd 的简单进度
+                if [ "$REMAINDER" -eq 0 ]; then
+                  dd if="$FILENAME" of=root.squashfs bs=1M skip="$SKIP_BLOCKS" 2>&1 | \
+                    grep -E "records|bytes" | sed 's/^/    /'
+                else
+                  dd if="$FILENAME" bs=1M skip="$SKIP_BLOCKS" 2>/dev/null | \
+                    dd bs=1 skip="$REMAINDER" of=root.squashfs 2>&1 | \
+                    grep -E "records|bytes" | sed 's/^/    /'
+                fi
+              fi
+
+              # 验证
+              echo -n "  ✅ 验证 squashfs... "
+              if ! unsquashfs -s root.squashfs >/dev/null 2>&1; then
+                echo "❌ 无效"
+                continue
+              fi
+              echo "有效 (大小: $(du -h root.squashfs | cut -f1))"
+
+              # 解包
+              echo -n "  📦 解包文件系统... "
+              rm -rf squashfs-root
+              if ! unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1; then
+                echo "❌ 失败"
+                continue
+              fi
+              echo "✅ 完成"
+
+              # 下载 lucky
+              echo -n "  🌐 下载 lucky... "
+              LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
+              if ! curl -L --progress-bar -o /tmp/lucky_custom "$LUCKY_URL"; then
+                echo "❌ 失败"
+                continue
+              fi
+              chmod 755 /tmp/lucky_custom
+              echo "✅ $(du -h /tmp/lucky_custom | cut -f1)"
+
+              # 注入
+              mkdir -p squashfs-root/usr/bin
+              cp /tmp/lucky_custom squashfs-root/usr/bin/lucky
+              echo "  ✅ lucky 已注入"
+
+              # 获取压缩参数
+              COMP=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
+              BLOCK=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
+              [ -z "$COMP" ] && COMP="xz"
+              [ -z "$BLOCK" ] && BLOCK="262144"
+              echo "  🛠️ 压缩: $COMP, 块大小: $BLOCK"
+
+              # 重打包
+              echo -n "  🔄 重打包文件系统... "
+              mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend -quiet
+              if [ ! -f new-root.squashfs ]; then
+                echo "❌ 失败"
+                continue
+              fi
+              echo "✅ $(du -h new-root.squashfs | cut -f1)"
+
+              ORIG_SIZE=$(stat -c%s root.squashfs)
+              NEW_SIZE=$(stat -c%s new-root.squashfs)
+              echo "  📊 原始大小: $(numfmt --to=iec $ORIG_SIZE), 新大小: $(numfmt --to=iec $NEW_SIZE)"
+              
+              if [ $NEW_SIZE -gt $ORIG_SIZE ]; then
+                echo "  ⚠️ 新镜像大了 $(numfmt --to=iec $((NEW_SIZE - ORIG_SIZE)))"
+              fi
+
+              # 拼接
+              echo -n "  🔗 拼接新固件... "
+              NEW_FW="lucky-$FILENAME"
+              if [ "$REMAINDER" -eq 0 ]; then
+                dd if="$FILENAME" of="$NEW_FW" bs=1M count="$SKIP_BLOCKS" status=none 2>/dev/null
+              else
+                dd if="$FILENAME" of="$NEW_FW" bs=1M count="$SKIP_BLOCKS" status=none 2>/dev/null
+                dd if="$FILENAME" bs=1M skip="$SKIP_BLOCKS" count=1 status=none 2>/dev/null | \
+                dd bs=1 count="$REMAINDER" status=none 2>/dev/null >> "$NEW_FW"
+              fi
+              cat new-root.squashfs >> "$NEW_FW"
+
+              if [ -s "$NEW_FW" ]; then
+                cp "$NEW_FW" "$GITHUB_WORKSPACE/output/"
+                echo "✅ 完成"
+                echo "  ✅ 生成: lucky-$FILENAME ($(du -h "$NEW_FW" | cut -f1))"
+              else
+                echo "❌ 失败"
+              fi
+
+              # 清理
+              rm -f "$FILENAME" root.squashfs new-root.squashfs "$NEW_FW" /tmp/lucky_custom
+              rm -rf squashfs-root
+              echo ""
+            done
+
+            cd ..
+            rm -rf "$WORK_DIR"
+          done
