@@ -1,4 +1,4 @@
-name: Inject Lucky into OpenWrt Releases (with Binwalk)
+name: Inject Lucky into OpenWrt Releases (Fast Binwalk)
 
 on:
   workflow_dispatch:
@@ -15,14 +15,14 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools curl jq binwalk python3
+          sudo apt-get install -y squashfs-tools curl jq binwalk
 
       - name: Process Release and Inject Lucky
         run: |
           set -eo pipefail
           mkdir -p output
 
-          # 解析输入的 tag
+          # 解析输入的 tag（支持多行）
           mapfile -t TAGS <<< "${{ inputs.release_tags }}"
           
           for TAG in "${TAGS[@]}"; do
@@ -56,6 +56,7 @@ jobs:
                 echo "⚠️ 固件下载失败"
                 continue
               fi
+
               echo ""
               echo "🔧 尝试注入 lucky 到: $FILENAME"
 
@@ -149,6 +150,11 @@ jobs:
               # === 🧹 清理临时文件 ===
               rm -f "$FILENAME" root.squashfs new-root.squashfs "lucky-$FILENAME" /tmp/lucky_custom
               rm -rf squashfs-root
+            done  # 结束 while 循环
+
+            cd ..
+            rm -rf "$WORK_DIR"
+          done  # 结束 for 循环
 
       - name: Upload Injected Firmwares
         uses: actions/upload-artifact@v4
@@ -161,10 +167,9 @@ jobs:
       - name: Final Summary
         run: |
           COUNT=$(ls output/ 2>/dev/null | wc -l)
-          echo "## 🎯 注入完成" >> "$GITHUB_STEP_SUMMARY"
-          echo "- 成功生成固件数量: $COUNT" >> "$GITHUB_STEP_SUMMARY"
-          if [ $COUNT -gt 0 ]; then
-            echo "- 固件已上传，请下载使用。" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$COUNT" -gt 0 ]; then
+            echo "✅ 成功生成 $COUNT 个注入固件，已上传为产物。"
           else
-            echo "- ❌ 未生成任何固件，请检查日志。" >> "$GITHUB_STEP_SUMMARY"
+            echo "❌ 未生成任何固件，请检查日志。"
+            exit 1
           fi
