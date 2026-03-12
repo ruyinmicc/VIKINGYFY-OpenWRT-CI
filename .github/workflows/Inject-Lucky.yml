@@ -1,4 +1,4 @@
-name: Inject Lucky into Sysupgrade Firmware Only
+name: Inject Lucky into Sysupgrade Firmware Only (Robust)
 
 on:
   workflow_dispatch:
@@ -38,16 +38,30 @@ jobs:
 
             # 获取 release 信息
             RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
-            if ! curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -o release.json "$RELEASE_URL" -w "%{http_code}" | grep -q "200"; then
-              echo "❌ Release 不存在或无权限"
+            HTTP_CODE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -o release.json "$RELEASE_URL" -w "%{http_code}")
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "❌ API 请求失败 (HTTP $HTTP_CODE)"
+              cat release.json 2>/dev/null || echo "(无响应内容)"
               cd .. && rm -rf "$WORK_DIR"
               continue
             fi
 
-            # 🔍 仅处理 sysupgrade 固件
-            jq -r '.assets[] | select(.name | endswith(".bin") and (.name | contains("sysupgrade"))) | .browser_download_url' release.json | while read -r URL; do
+            # 🔍 安全提取 sysupgrade 固件 URL（修复 jq 类型错误）
+            jq -r '
+              if has("assets") and (.assets | type == "array") then
+                .assets[] |
+                select(type == "object") |
+                select(has("name") and has("browser_download_url")) |
+                select(.name | endswith(".bin") and contains("sysupgrade")) |
+                .browser_download_url
+              else
+                empty
+              end
+            ' release.json | while IFS= read -r URL; do
               [ -z "$URL" ] && continue
+
               FILENAME=$(basename "$URL")
               echo "📥 下载 sysupgrade 固件: $FILENAME"
               if ! curl -L -s -o "$FILENAME" "$URL" || [ ! -s "$FILENAME" ]; then
@@ -140,7 +154,6 @@ jobs:
               NEW_SIZE=$(stat -c%s new-root.squashfs)
               if [ $NEW_SIZE -gt $ORIG_SIZE ]; then
                 echo "  ⚠️ 新 rootfs 大了 $(($NEW_SIZE - ORIG_SIZE)) 字节"
-                # sysupgrade 通常允许稍大（只要不超过分区）
               fi
 
               # === 🔗 拼接新固件（仅 Magic 路径可安全拼接）===
@@ -162,11 +175,11 @@ jobs:
               # === 清理 ===
               rm -f "$FILENAME" root.squashfs new-root.squashfs /tmp/lucky_custom
               rm -rf squashfs-root
-            done
+            done  # end while
 
             cd ..
             rm -rf "$WORK_DIR"
-          done
+          done  # end for
 
       - name: Upload Injected Sysupgrade Firmwares
         uses: actions/upload-artifact@v4
