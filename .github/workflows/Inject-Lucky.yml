@@ -1,24 +1,12 @@
-name: Inject Lucky into OpenWrt Releases (Stable & Universal)
+name: Inject Lucky into OpenWrt Releases (Final Stable)
 
 on:
   workflow_dispatch:
     inputs:
       release_tags:
-        description: |
-          输入要处理的 Release Tags（一行一个）
-          例如：
-          IPQ60XX-WIFI-YES-VIKINGYFY-main-26.03.11-23.53.36
+        description: '输入 Release Tag（一行一个）'
         required: true
         type: string
-      firmware_filter:
-        description: '固件过滤（可选）'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - sysupgrade only
-          - factory only
 
 jobs:
   inject-lucky:
@@ -39,91 +27,55 @@ jobs:
           chmod 755 lucky_custom
           echo "LUCKY_SIZE=$(du -h lucky_custom | cut -f1)" >> "$GITHUB_ENV"
           echo "LUCKY_SHA256=$(sha256sum lucky_custom | cut -d' ' -f1)" >> "$GITHUB_ENV"
-          echo "✅ Lucky binary downloaded"
 
-      - name: Parse Release Tags
-        id: parse
-        run: |
-          TAGS=$(echo '${{ inputs.release_tags }}' | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-          COUNT=$(echo "$TAGS" | grep -v '^$' | wc -l)
-          {
-            echo "tags<<EOF"
-            echo "$TAGS"
-            echo "EOF"
-            echo "count=$COUNT"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Set Firmware Filter
-        id: filter
-        run: |
-          case "${{ inputs.firmware_filter }}" in
-            "sysupgrade only") echo "pattern=sysupgrade" ;;
-            "factory only")   echo "pattern=factory" ;;
-            *)                echo "pattern=.*" ;;
-          esac >> "$GITHUB_OUTPUT"
-
-      - name: Process Each Release
+      - name: Process Release
         run: |
           set -eo pipefail
           mkdir -p output
-          SUCCESS_COUNT=0
-          FAIL_COUNT=0
-          TOTAL_INJECTED=0
 
-          mapfile -t TAGS <<< "${{ steps.parse.outputs.tags }}"
+          # 解析输入的 tag（支持多行）
+          mapfile -t TAGS <<< "${{ inputs.release_tags }}"
+          
           for TAG in "${TAGS[@]}"; do
+            TAG=$(echo "$TAG" | xargs)  # 去除首尾空格
             [ -z "$TAG" ] && continue
+
             echo ""
             echo "========================================="
-            echo "📦 开始处理 Release: $TAG"
+            echo "📦 处理 Release: $TAG"
             echo "========================================="
 
-            WORK_DIR="temp_$(echo "$TAG" | tr '/.' '_' | tr '-' '_')"
+            WORK_DIR="work_$(date +%s)_$$"
             mkdir -p "$WORK_DIR"
             cd "$WORK_DIR"
 
-            # 获取 release 信息
+            # 下载 release 信息
             RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
             if ! curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -o release_info.json "$RELEASE_URL" -w "%{http_code}" | grep -q "200"; then
-              echo "❌ Release 不存在或无权限访问"
+              -o release.json "$RELEASE_URL" -w "%{http_code}" | grep -q "200"; then
+              echo "❌ Release 不存在"
               cd .. && rm -rf "$WORK_DIR"
-              FAIL_COUNT=$((FAIL_COUNT + 1))
               continue
             fi
 
-            # 下载 .bin 固件
-            PATTERN="${{ steps.filter.outputs.pattern }}"
-            ASSETS=$(jq -r ".assets[] | select(.name | test(\".*($PATTERN).*\\\\.bin$\")) | .browser_download_url" release_info.json)
-            [ -z "$ASSETS" ] && { echo "⚠️ 未找到 .bin 固件"; cd .. && rm -rf "$WORK_DIR"; continue; }
-
-            FIRMWARE_COUNT=0
-            for URL in $ASSETS; do
+            # 下载所有 .bin 固件
+            jq -r '.assets[] | select(.name | endswith(".bin")) | .browser_download_url' release.json | while read -r URL; do
+              [ -z "$URL" ] && continue
               FILENAME=$(basename "$URL")
-              if curl -L -s -o "$FILENAME" "$URL" && [ -s "$FILENAME" ]; then
-                FIRMWARE_COUNT=$((FIRMWARE_COUNT + 1))
+              echo "📥 下载: $FILENAME"
+              if ! curl -L -s -o "$FILENAME" "$URL" || [ ! -s "$FILENAME" ]; then
+                echo "⚠️ 下载失败: $FILENAME"
+                continue
               fi
-            done
 
-            [ $FIRMWARE_COUNT -eq 0 ] && { cd .. && rm -rf "$WORK_DIR"; continue; }
-
-            # 处理每个固件
-            shopt -s nullglob
-            INJECT_COUNT=0
-            for FW in *.bin; do
-              [ -f "$FW" ] || continue
               echo ""
-              echo "🔧 正在注入 lucky 到: $FW"
+              echo "🔧 注入 lucky 到: $FILENAME"
 
-              # === 🔍 二进制搜索 squashfs 签名（关键修复！）===
-              echo "🔍 搜索 squashfs 签名 (hsqs/sqsh)..."
+              # === 🔍 二进制搜索 squashfs 签名（关键修复：|| true）===
               OFFSET=""
-
-              # 读取前 256MB 数据（高效、低内存）
-              if [ -s "$FW" ]; then
-                # 使用 dd 限制读取范围，避免大文件问题
-                HSQS_OFF=$(dd if="$FW" bs=1M count=256 2>/dev/null | grep -aob $'\x68\x73\x71\x73' | head -1 | cut -d: -f1)
-                SQSH_OFF=$(dd if="$FW" bs=1M count=256 2>/dev/null | grep -aob $'\x73\x71\x73\x68' | head -1 | cut -d: -f1)
+              if [ -s "$FILENAME" ]; then
+                HSQS_OFF=$(dd if="$FILENAME" bs=1M count=256 2>/dev/null | grep -aob $'\x68\x73\x71\x73' | head -1 | cut -d: -f1 || true)
+                SQSH_OFF=$(dd if="$FILENAME" bs=1M count=256 2>/dev/null | grep -aob $'\x73\x71\x73\x68' | head -1 | cut -d: -f1 || true)
 
                 if [ -n "$HSQS_OFF" ]; then
                   OFFSET=$HSQS_OFF
@@ -133,129 +85,98 @@ jobs:
               fi
 
               if [ -z "$OFFSET" ]; then
-                echo "  ⚠️ 未找到 squashfs 签名 (hsqs/sqsh)"
+                echo "  ⚠️ 未找到 squashfs 签名"
+                rm -f "$FILENAME"
                 continue
               fi
 
               OFFSET_HEX=$(printf "%08x" $OFFSET)
-              echo "  📍 找到 squashfs 偏移: $OFFSET (0x$OFFSET_HEX)"
+              echo "  📍 找到偏移: $OFFSET (0x$OFFSET_HEX)"
 
-              # === 💾 高效提取 squashfs（通用对齐处理）===
-              BLOCK_SIZE=1048576  # 1MB
+              # === 💾 提取 squashfs ===
+              BLOCK_SIZE=1048576
               SKIP_BLOCKS=$((OFFSET / BLOCK_SIZE))
               REMAINDER=$((OFFSET % BLOCK_SIZE))
 
-              echo "  💾 提取 squashfs (skip=${SKIP_BLOCKS}M + ${REMAINDER}B)..."
               if [ $REMAINDER -eq 0 ]; then
-                dd if="$FW" of=root.squashfs bs=1M skip=$SKIP_BLOCKS status=none 2>/dev/null
+                dd if="$FILENAME" of=root.squashfs bs=1M skip=$SKIP_BLOCKS status=none 2>/dev/null
               else
-                dd if="$FW" bs=1M skip=$SKIP_BLOCKS status=none 2>/dev/null | \
+                dd if="$FILENAME" bs=1M skip=$SKIP_BLOCKS status=none 2>/dev/null | \
                 dd bs=1 skip=$REMAINDER status=none 2>/dev/null > root.squashfs
               fi
 
-              # === ✅ 验证提取结果 ===
               if [ ! -s root.squashfs ]; then
-                echo "  ⚠️ 提取的 squashfs 为空或未生成"
+                echo "  ⚠️ 提取失败：squashfs 为空"
+                rm -f "$FILENAME"
                 continue
               fi
 
               if ! unsquashfs -s root.squashfs >/dev/null 2>&1; then
-                echo "  ⚠️ 提取内容不是有效的 squashfs"
-                echo "      大小: $(stat -c%s root.squashfs) B"
-                hexdump -C root.squashfs | head -n2
-                continue
-              fi
-
-              # === 📦 解包 ===
-              rm -rf squashfs-root
-              if ! unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1; then
-                echo "  ⚠️ 解包失败"
+                echo "  ⚠️ 无效的 squashfs"
+                rm -f "$FILENAME"
                 continue
               fi
 
               # === 🧬 注入 lucky ===
+              rm -rf squashfs-root
+              unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1
               mkdir -p squashfs-root/usr/bin
               cp "$GITHUB_WORKSPACE/lucky_custom" squashfs-root/usr/bin/lucky
               chmod 755 squashfs-root/usr/bin/lucky
-              echo "  ✅ lucky 已注入到 /usr/bin/lucky"
+              echo "  ✅ lucky 已注入"
 
-              # === 🛠️ 获取原始压缩参数 ===
+              # === 🔄 重打包 ===
               COMP=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
               BLOCK=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
               [ -z "$COMP" ] && COMP="xz"
               [ -z "$BLOCK" ] && BLOCK="262144"
-              echo "  🛠️ 使用压缩: $COMP, 块大小: ${BLOCK}B"
 
-              # === 🔄 重打包 ===
-              rm -f new-root.squashfs
-              if ! mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend -quiet; then
-                echo "  ⚠️ 重打包失败"
-                continue
-              fi
+              mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend -quiet
 
               ORIG_SIZE=$(stat -c%s root.squashfs)
               NEW_SIZE=$(stat -c%s new-root.squashfs)
-              echo "  📊 原始大小: $ORIG_SIZE B, 新大小: $NEW_SIZE B"
+              echo "  📊 原始: $ORIG_SIZE B, 新: $NEW_SIZE B"
               if [ $NEW_SIZE -gt $ORIG_SIZE ]; then
-                echo "  ⚠️ 新镜像大了 $(($NEW_SIZE - ORIG_SIZE)) 字节！可能无法刷写！"
+                echo "  ⚠️ 新镜像过大！可能无法刷写！"
               fi
 
               # === 🔗 拼接新固件 ===
-              NEW_FW="lucky-$FW"
-              echo "  🔧 拼接固件头部 ($OFFSET 字节)..."
+              NEW_FW="lucky-$FILENAME"
               if [ $REMAINDER -eq 0 ]; then
-                dd if="$FW" of="$NEW_FW" bs=1M count=$SKIP_BLOCKS status=none 2>/dev/null
+                dd if="$FILENAME" of="$NEW_FW" bs=1M count=$SKIP_BLOCKS status=none 2>/dev/null
               else
-                dd if="$FW" of="$NEW_FW" bs=1M count=$SKIP_BLOCKS status=none 2>/dev/null
-                dd if="$FW" bs=1M skip=$SKIP_BLOCKS count=1 status=none 2>/dev/null | \
+                dd if="$FILENAME" of="$NEW_FW" bs=1M count=$SKIP_BLOCKS status=none 2>/dev/null
+                dd if="$FILENAME" bs=1M skip=$SKIP_BLOCKS count=1 status=none 2>/dev/null | \
                 dd bs=1 count=$REMAINDER status=none 2>/dev/null >> "$NEW_FW"
               fi
               cat new-root.squashfs >> "$NEW_FW"
 
               if [ -s "$NEW_FW" ]; then
-                FINAL_NAME="${TAG//\//-}-$(basename "$NEW_FW")"
-                cp "$NEW_FW" "$GITHUB_WORKSPACE/output/$FINAL_NAME"
-                echo "  ✅ 注入成功: $FINAL_NAME"
-                INJECT_COUNT=$((INJECT_COUNT + 1))
-                TOTAL_INJECTED=$((TOTAL_INJECTED + 1))
+                cp "$NEW_FW" "$GITHUB_WORKSPACE/output/"
+                echo "  ✅ 生成: lucky-$FILENAME"
               else
                 echo "  ⚠️ 新固件为空"
               fi
 
-              # === 🧹 清理 ===
-              rm -f root.squashfs new-root.squashfs "$NEW_FW"
+              # 清理
+              rm -f "$FILENAME" root.squashfs new-root.squashfs "$NEW_FW"
               rm -rf squashfs-root
             done
 
-            echo "📊 Release $TAG: $INJECT_COUNT/$FIRMWARE_COUNT 固件注入成功"
             cd ..
             rm -rf "$WORK_DIR"
-            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
           done
 
-          echo ""
-          echo "========================================="
-          echo "📊 处理完成统计"
-          echo "========================================="
-          echo "✅ 成功处理的 Release: $SUCCESS_COUNT"
-          echo "❌ 失败的 Release: $FAIL_COUNT"
-          echo "📦 总共注入固件: $TOTAL_INJECTED"
-
-      - name: Upload Modified Firmwares
+      - name: Upload Results
         uses: actions/upload-artifact@v4
         with:
-          name: lucky-injected-firmwares-${{ github.run_id }}
-          path: output/*
-          retention-days: 30
+          name: lucky-firmwares
+          path: output/
           if-no-files-found: warn
 
-      - name: Create Summary
+      - name: Summary
         run: |
-          echo "## 🎯 Lucky 注入结果" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| 项目 | 结果 |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| 处理的 Release | ${{ steps.parse.outputs.count }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| 生成的固件数量 | $(ls output/ 2>/dev/null | wc -l) |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Lucky 大小 | ${{ env.LUCKY_SIZE }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Lucky SHA256 | ${{ env.LUCKY_SHA256 }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "## 🎯 注入完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Lucky 大小: ${{ env.LUCKY_SIZE }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- SHA256: ${{ env.LUCKY_SHA256 }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 输出文件数: $(ls output/ 2>/dev/null | wc -l)" >> "$GITHUB_STEP_SUMMARY"
