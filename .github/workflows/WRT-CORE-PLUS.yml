@@ -227,7 +227,7 @@ jobs:
           echo "📁 使用 staging_dir: $(basename "$STAGING_DIR")"
 
           # 强制注入到 /usr/bin/lucky
-          mkdir - p "$STAGING_DIR/usr/bin"
+          mkdir -p "$STAGING_DIR/usr/bin"
           cp -f "$CUSTOM_LUCKY" "$STAGING_DIR/usr/bin/lucky"
           chmod 755 "$STAGING_DIR/usr/bin/lucky"
           echo "✅ 已注入 lucky 到 $STAGING_DIR/usr/bin/lucky"
