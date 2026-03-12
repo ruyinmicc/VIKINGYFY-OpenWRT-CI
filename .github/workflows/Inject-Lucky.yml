@@ -1,4 +1,4 @@
-name: Inject Lucky into Sysupgrade Firmware Only (Robust)
+name: Inject Lucky via Fixed Offset (IPQ60xx Sysupgrade)
 
 on:
   workflow_dispatch:
@@ -15,12 +15,15 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools curl jq xxd binwalk
+          sudo apt-get install -y squashfs-tools curl jq xxd
 
-      - name: Process Sysupgrade Firmware and Inject Lucky
+      - name: Process Sysupgrade Firmware with Fixed Offset
         run: |
           set -eo pipefail
           mkdir -p output
+
+          # 固定偏移：0x0054b400 = 5551104 字节
+          SQUASH_OFFSET=5551104
 
           mapfile -t TAGS <<< "${{ inputs.release_tags }}"
           for TAG in "${TAGS[@]}"; do
@@ -48,7 +51,7 @@ jobs:
               continue
             fi
 
-            # 🔍 安全提取 sysupgrade 固件 URL（修复 jq 类型错误）
+            # 🔍 仅处理 sysupgrade 固件（安全 jq）
             jq -r '
               if has("assets") and (.assets | type == "array") then
                 .assets[] |
@@ -69,65 +72,32 @@ jobs:
                 continue
               fi
 
-              echo "🔧 尝试注入 lucky 到: $FILENAME"
-
-              FOUND_SQUASH=0
               FILE_SIZE=$(stat -c%s "$FILENAME")
-
-              # === 🚀 第一阶段：Magic 检测（快速）===
-              POSSIBLE_OFFSETS=(
-                $((0x00500000)) $((0x00540000)) $((0x0054b400))
-                $((0x00550000)) $((0x00580000)) $((0x00600000))
-              )
-
-              for OFFSET in "${POSSIBLE_OFFSETS[@]}"; do
-                if [ "$OFFSET" -lt "$FILE_SIZE" ]; then
-                  MAGIC=$(dd if="$FILENAME" bs=1 skip="$OFFSET" count=4 2>/dev/null | xxd -p | tr -d '\n')
-                  if [[ "$MAGIC" == "73717368" ]]; then
-                    dd if="$FILENAME" of="root.squashfs" bs=1 skip="$OFFSET" 2>/dev/null
-                    if [ -s "root.squashfs" ]; then
-                      FOUND_SQUASH=1
-                      SQUASH_OFFSET=$OFFSET
-                      echo "  ✅ Magic 检测成功 @ 0x$(printf "%08x" $OFFSET)"
-                      break
-                    fi
-                  fi
-                fi
-              done
-
-              # === 🔄 第二阶段：binwalk 提取（备用）===
-              if [ "$FOUND_SQUASH" -eq 0 ]; then
-                echo "  ⏳ Magic 失败，尝试 binwalk..."
-                EXTRACT_DIR="extract_$$"
-                mkdir -p "$EXTRACT_DIR"
-                if timeout 25 binwalk -e --run-as-root --no-entropy -C "$EXTRACT_DIR" "$FILENAME" >/dev/null 2>&1; then
-                  SQUASH_FILE=$(find "$EXTRACT_DIR" -type f -name "*.squashfs" | head -1)
-                  if [ -n "$SQUASH_FILE" ] && [ -s "$SQUASH_FILE" ]; then
-                    cp "$SQUASH_FILE" root.squashfs
-                    FOUND_SQUASH=1
-                    echo "  ✅ binwalk 提取成功"
-                  fi
-                else
-                  echo "  ⚠️ binwalk 超时或失败"
-                fi
-                rm -rf "$EXTRACT_DIR"
-              fi
-
-              if [ "$FOUND_SQUASH" -eq 0 ]; then
-                echo "  ❌ 无法获取 SquashFS"
+              if [ "$SQUASH_OFFSET" -ge "$FILE_SIZE" ]; then
+                echo "  ❌ 偏移 $SQUASH_OFFSET 超出文件大小 ($FILE_SIZE)"
                 rm -f "$FILENAME"
                 continue
               fi
 
-              # === 解包 rootfs ===
+              echo "🔧 使用固定偏移 $SQUASH_OFFSET (0x$(printf "%08x" $SQUASH_OFFSET)) 提取 rootfs..."
+
+              # === 1. 提取 rootfs ===
+              dd if="$FILENAME" of="root.squashfs" bs=1 skip="$SQUASH_OFFSET" 2>/dev/null
+              if [ ! -s "root.squashfs" ]; then
+                echo "  ❌ 提取的 rootfs 为空"
+                rm -f "$FILENAME"
+                continue
+              fi
+
+              # === 2. 解包 rootfs ===
               rm -rf squashfs-root
               if ! unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1; then
-                echo "  ⚠️ 解包失败"
+                echo "  ⚠️ 解包 squashfs 失败"
                 rm -f "$FILENAME" root.squashfs
                 continue
               fi
 
-              # === 注入 lucky ===
+              # === 3. 注入 lucky ===
               echo "  🌐 下载 lucky..."
               LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
               if ! curl -L --retry 3 -s -o /tmp/lucky_custom "$LUCKY_URL" || [ ! -s /tmp/lucky_custom ]; then
@@ -142,7 +112,7 @@ jobs:
               chmod 755 squashfs-root/usr/bin/lucky
               echo "  ✅ lucky 已注入"
 
-              # === 重打包 ===
+              # === 4. 重打包 rootfs（保留原始参数）===
               COMP=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
               BLOCK=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
               [ -z "$COMP" ] && COMP="xz"
@@ -150,36 +120,32 @@ jobs:
 
               mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend -quiet
 
-              ORIG_SIZE=$(stat -c%s root.squashfs)
-              NEW_SIZE=$(stat -c%s new-root.squashfs)
-              if [ $NEW_SIZE -gt $ORIG_SIZE ]; then
-                echo "  ⚠️ 新 rootfs 大了 $(($NEW_SIZE - ORIG_SIZE)) 字节"
+              ORIG_ROOT_SIZE=$(stat -c%s root.squashfs)
+              NEW_ROOT_SIZE=$(stat -c%s new-root.squashfs)
+              if [ $NEW_ROOT_SIZE -gt $ORIG_ROOT_SIZE ]; then
+                echo "  ⚠️ 新 rootfs 大了 $(($NEW_ROOT_SIZE - $ORIG_ROOT_SIZE)) 字节，可能无法刷写！"
+                # 仍继续生成，供用户判断
               fi
 
-              # === 🔗 拼接新固件（仅 Magic 路径可安全拼接）===
-              if [ "$FOUND_SQUASH" -eq 1 ] && [ -n "${SQUASH_OFFSET+x}" ]; then
-                dd if="$FILENAME" of="lucky-$FILENAME" bs=1 count="$SQUASH_OFFSET" status=none 2>/dev/null
-                cat new-root.squashfs >> "lucky-$FILENAME"
-                if [ -s "lucky-$FILENAME" ]; then
-                  cp "lucky-$FILENAME" "$GITHUB_WORKSPACE/output/"
-                  echo "  ✅ 生成注入固件: lucky-$FILENAME"
-                else
-                  echo "  ⚠️ 拼接后文件为空"
-                fi
+              # === 5. 拼接新固件 ===
+              dd if="$FILENAME" of="lucky-$FILENAME" bs=1 count="$SQUASH_OFFSET" status=none 2>/dev/null
+              cat new-root.squashfs >> "lucky-$FILENAME"
+
+              if [ -s "lucky-$FILENAME" ]; then
+                cp "lucky-$FILENAME" "$GITHUB_WORKSPACE/output/"
+                echo "  ✅ 生成注入固件: lucky-$FILENAME"
               else
-                # binwalk 路径：输出 rootfs 供手动集成
-                cp new-root.squashfs "$GITHUB_WORKSPACE/output/lucky-rootfs-$(basename "$FILENAME").squashfs"
-                echo "  💾 输出 rootfs: lucky-rootfs-$(basename "$FILENAME").squashfs"
+                echo "  ❌ 拼接后文件为空"
               fi
 
               # === 清理 ===
               rm -f "$FILENAME" root.squashfs new-root.squashfs /tmp/lucky_custom
               rm -rf squashfs-root
-            done  # end while
+            done
 
             cd ..
             rm -rf "$WORK_DIR"
-          done  # end for
+          done
 
       - name: Upload Injected Sysupgrade Firmwares
         uses: actions/upload-artifact@v4
@@ -193,8 +159,8 @@ jobs:
         run: |
           COUNT=$(ls output/ 2>/dev/null | wc -l)
           if [ "$COUNT" -gt 0 ]; then
-            echo "✅ 成功生成 $COUNT 个 sysupgrade 固件或 rootfs"
+            echo "✅ 成功生成 $COUNT 个注入版 sysupgrade 固件"
           else
-            echo "❌ 未生成任何产物"
+            echo "❌ 未生成任何固件"
             exit 1
           fi
