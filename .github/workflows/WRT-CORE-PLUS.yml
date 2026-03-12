@@ -190,7 +190,7 @@ jobs:
           echo "========================================================="
 
           # 下载
-          curl -L -o "$CUSTOM_LUCKY" "http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
+          curl -L -o "$CUSTOM_LUCKY" "https://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
           if [ ! -s "$CUSTOM_LUCKY" ]; then
             echo "❌ lucky 下载失败！"
             exit 1
