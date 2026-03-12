@@ -1,4 +1,4 @@
-name: Inject Lucky via Fixed Offset (IPQ60xx Sysupgrade)
+name: Inject Lucky via fwtool (Universal Sysupgrade)
 
 on:
   workflow_dispatch:
@@ -17,13 +17,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y squashfs-tools curl jq xxd
 
-      - name: Process Sysupgrade Firmware with Fixed Offset
+      - name: Install OpenWrt fwtool
+        run: |
+          # 下载官方 fwtool.sh 脚本（纯 Bash，无编译依赖）
+          curl -L https://raw.githubusercontent.com/openwrt/openwrt/master/scripts/fwtool.sh -o fwtool.sh
+          chmod +x fwtool.sh
+          sudo mv fwtool.sh /usr/local/bin/fwtool
+          echo "✅ fwtool installed"
+
+      - name: Process Sysupgrade Firmware with fwtool
         run: |
           set -eo pipefail
           mkdir -p output
-
-          # 固定偏移：0x0054b400 = 5551104 字节
-          SQUASH_OFFSET=5551104
 
           mapfile -t TAGS <<< "${{ inputs.release_tags }}"
           for TAG in "${TAGS[@]}"; do
@@ -72,20 +77,19 @@ jobs:
                 continue
               fi
 
-              FILE_SIZE=$(stat -c%s "$FILENAME")
-              if [ "$SQUASH_OFFSET" -ge "$FILE_SIZE" ]; then
-                echo "  ❌ 偏移 $SQUASH_OFFSET 超出文件大小 ($FILE_SIZE)"
+              echo "🔧 使用 fwtool 解包固件..."
+
+              # === 1. 解包 sysupgrade 镜像 ===
+              if ! fwtool -x "$FILENAME"; then
+                echo "  ❌ fwtool 解包失败（可能不是 TRX 格式）"
                 rm -f "$FILENAME"
                 continue
               fi
 
-              echo "🔧 使用固定偏移 $SQUASH_OFFSET (0x$(printf "%08x" $SQUASH_OFFSET)) 提取 rootfs..."
-
-              # === 1. 提取 rootfs ===
-              dd if="$FILENAME" of="root.squashfs" bs=1 skip="$SQUASH_OFFSET" 2>/dev/null
-              if [ ! -s "root.squashfs" ]; then
-                echo "  ❌ 提取的 rootfs 为空"
-                rm -f "$FILENAME"
+              # 检查是否生成了 root.squashfs
+              if [ ! -f "root.squashfs" ]; then
+                echo "  ❌ 未找到 root.squashfs（可能为 initramfs 或其他格式）"
+                rm -f "$FILENAME" kernel.bin 2>/dev/null
                 continue
               fi
 
@@ -93,7 +97,7 @@ jobs:
               rm -rf squashfs-root
               if ! unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1; then
                 echo "  ⚠️ 解包 squashfs 失败"
-                rm -f "$FILENAME" root.squashfs
+                rm -f "$FILENAME" kernel.bin root.squashfs
                 continue
               fi
 
@@ -102,7 +106,7 @@ jobs:
               LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
               if ! curl -L --retry 3 -s -o /tmp/lucky_custom "$LUCKY_URL" || [ ! -s /tmp/lucky_custom ]; then
                 echo "  ❌ lucky 下载失败"
-                rm -f "$FILENAME" root.squashfs
+                rm -f "$FILENAME" kernel.bin root.squashfs
                 continue
               fi
               chmod 755 /tmp/lucky_custom
@@ -123,23 +127,25 @@ jobs:
               ORIG_ROOT_SIZE=$(stat -c%s root.squashfs)
               NEW_ROOT_SIZE=$(stat -c%s new-root.squashfs)
               if [ $NEW_ROOT_SIZE -gt $ORIG_ROOT_SIZE ]; then
-                echo "  ⚠️ 新 rootfs 大了 $(($NEW_ROOT_SIZE - $ORIG_ROOT_SIZE)) 字节，可能无法刷写！"
-                # 仍继续生成，供用户判断
+                echo "  ⚠️ 新 rootfs 大了 $(($NEW_ROOT_SIZE - $ORIG_ROOT_SIZE)) 字节"
               fi
 
-              # === 5. 拼接新固件 ===
-              dd if="$FILENAME" of="lucky-$FILENAME" bs=1 count="$SQUASH_OFFSET" status=none 2>/dev/null
-              cat new-root.squashfs >> "lucky-$FILENAME"
+              # === 5. 重新构建 sysupgrade 镜像 ===
+              if ! fwtool -b -k kernel.bin -r new-root.squashfs -o "lucky-$FILENAME"; then
+                echo "  ❌ fwtool 重打包失败"
+                rm -f "$FILENAME" kernel.bin root.squashfs new-root.squashfs
+                continue
+              fi
 
               if [ -s "lucky-$FILENAME" ]; then
                 cp "lucky-$FILENAME" "$GITHUB_WORKSPACE/output/"
                 echo "  ✅ 生成注入固件: lucky-$FILENAME"
               else
-                echo "  ❌ 拼接后文件为空"
+                echo "  ❌ 生成的固件为空"
               fi
 
               # === 清理 ===
-              rm -f "$FILENAME" root.squashfs new-root.squashfs /tmp/lucky_custom
+              rm -f "$FILENAME" kernel.bin root.squashfs new-root.squashfs /tmp/lucky_custom
               rm -rf squashfs-root
             done
 
@@ -150,7 +156,7 @@ jobs:
       - name: Upload Injected Sysupgrade Firmwares
         uses: actions/upload-artifact@v4
         with:
-          name: lucky-sysupgrade-firmwares
+          name: lucky-sysupgrade-firmwares-fwtool
           path: output/
           retention-days: 7
           if-no-files-found: warn
@@ -159,7 +165,7 @@ jobs:
         run: |
           COUNT=$(ls output/ 2>/dev/null | wc -l)
           if [ "$COUNT" -gt 0 ]; then
-            echo "✅ 成功生成 $COUNT 个注入版 sysupgrade 固件"
+            echo "✅ 成功生成 $COUNT 个注入版 sysupgrade 固件（使用 fwtool）"
           else
             echo "❌ 未生成任何固件"
             exit 1
