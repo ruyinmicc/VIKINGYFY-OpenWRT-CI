@@ -1,1 +1,87 @@
-bmFtZTogSW5qZWN0IEx1Y2t5IGludG8gSVBQNjB4eCBTeXN1cGdyYWRlCgpvbjoKICB3b3JrZmxvd19kaXNwYXRjaDoKICAgIGlucHV0czoKICAgICAgcmVsZWFzZV90YWc6CiAgICAgICAgZGVzY3JpcHRpb246ICdSZWxlYXNlIFRhZyAoZS5nLiwgbWFpbi0yNi4wMy4xMS0yMy41My4zNiknCiAgICAgICAgcmVxdWlyZWQ6IHRydWUKICAgICAgICB0eXBlOiBzdHJpbmcKICAgICAgbHVja3lfdXJsOgogICAgICAgIGRlc2NyaXB0aW9uOiAnVVJMIHRvIGFhcmNoNjQgbHVja3kgYmluYXJ5JwogICAgICAgIHJlcXVpcmVkOiBmYWxzZQogICAgICAgIHR5cGU6IHN0cmluZwogICAgICAgIGRlZmF1bHQ6ICJodHRwOi8vYWxpc3RsYy52Ni5hcm15OjEzNjY2L2QvZ3VzZXQvb3Blbi9sdWNreT9zaWduPVNpRW1VbXpRYl9tOTgzM2tucnY3MkV2eXZRM3NFUW1pbDBIci16Zkk5Mk09OjAiCgpqb2JzOgogIGluamVjdC1sdWNreToKICAgIHJ1bnMtb246IHVidW50dS0yMi4wNAogICAgc3RlcHM6CiAgICAgIC0gdXNlczogYWN0aW9ucy9jaGVja291dEB2NAoKICAgICAgLSBuYW1lOiBJbnN0YWxsIGRlcGVuZGVuY2llcwogICAgICAgIHJ1bjogc3VkbyBhcHQtZ2V0IHVwZGF0ZSAmJiBzdWRvIGFwdC1nZXQgaW5zdGFsbCAteSBiaW51dGlscyBzcXVhc2hmcy10b29scyBjcGlvIGd6aXAganEKCiAgICAgIC0gbmFtZTogRG93bmxvYWQgTHVja3kgYmluYXJ5CiAgICAgICAgZW52OgogICAgICAgICAgTFVDS1lfVVJMOiAke3sgZ2l0aHViLmV2ZW50LmlucHV0cy5sdWNreV91cmwgfX0KICAgICAgICBydW46IHwKICAgICAgICAgIG1rZGlyIC1wIGx1Y2t5CiAgICAgICAgICBjdXJsIC1mTCAiJExVQ0tZX1VSTCIgLW8gbHVja3kvbHVja3kKICAgICAgICAgIGNobW9kICt4IGx1Y2t5L2x1Y2t5CiAgICAgICAgICBmaWxlIGx1Y2t5L2x1Y2t5IHwgZ3JlcCAtcSAiYWFyY2g2NCIgfHwgeyBlY2hvICJOb3QgYWFyY2g2NCEiOyBleGl0IDE7IH0KCiAgICAgIC0gbmFtZTogRG
+
+name: Inject Lucky Binary Only
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'OpenWrt Release Tag (e.g., main-26.03.11-23.53.36)'
+        required: true
+        type: string
+
+jobs:
+  inject:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binwalk squashfs-tools curl jq
+
+      - name: Download Lucky (aarch64)
+        run: |
+          mkdir -p work
+          curl -fL "http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0" -o work/lucky
+          chmod +x work/lucky
+          if ! file work/lucky | grep -q "aarch64"; then
+            echo "❌ Not aarch64 binary!"
+            exit 1
+          fi
+
+      - name: Download firmware by tag
+        env:
+          TAG: ${{ github.event.inputs.release_tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER="VIKINGYFY"
+          REPO="OpenWRT-CI"
+          RELEASE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$OWNER/$REPO/releases/tags/$TAG")
+          ASSET=$(echo "$RELEASE" | jq -r '.assets[] | select(.name | test("ipq60xx.*sysupgrade.*\\.bin$"; "i")) .name' | head -n1)
+          [ -n "$ASSET" ] || { echo "❌ Firmware not found"; exit 1; }
+          wget -O work/firmware.bin "https://github.com/$OWNER/$REPO/releases/download/$TAG/$ASSET"
+
+      - name: Inject lucky into rootfs
+        working-directory: work
+        run: |
+          set -e
+          FIRMWARE="firmware.bin"
+          OUTPUT="firmware-lucky.bin"
+
+          # Locate squashfs
+          OFFSET=$(binwalk -y squashfs "$FIRMWARE" 2>/dev/null | tail -n1 | awk '{print $1}')
+          [ -n "$OFFSET" ] || OFFSET=$(grep -a -b -o 'hsqs' "$FIRMWARE" | head -n1 | cut -d: -f1)
+          [ -n "$OFFSET" ] || { echo "❌ squashfs not found"; exit 1; }
+
+          dd if="$FIRMWARE" bs=1 skip="$OFFSET" of=root.squashfs 2>/dev/null
+          unsquashfs -f -d rootfs root.squashfs
+
+          # Only copy binary — no init script
+          cp lucky rootfs/usr/bin/
+          chmod +x rootfs/usr/bin/lucky
+
+          # Repack with original parameters
+          INFO=$(unsquashfs -s root.squashfs 2>/dev/null || true)
+          COMP=xz; BS=262144
+          [[ "$INFO" == *"gzip"* ]] && COMP=gzip
+          [[ "$INFO" =~ Block\ size\ ([0-9]+) ]] && BS=${BASH_REMATCH}
+
+          mksquashfs rootfs/ new-root.squashfs -comp "$COMP" -b "$BS" -noappend -always-use-fragments
+
+          OLD=$(stat -c%s root.squashfs)
+          NEW=$(stat -c%s new-root.squashfs)
+          [ "$NEW" -gt "$OLD" ] && echo "⚠️ New rootfs is larger than original"
+
+          head -c "$OFFSET" "$FIRMWARE" > "$OUTPUT"
+          cat new-root.squashfs >> "$OUTPUT"
+          tail -c +$((OFFSET + OLD + 1)) "$FIRMWARE" >> "$OUTPUT" 2>/dev/null || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-lucky-${{ github.event.inputs.release_tag }}
+          path: work/firmware-lucky.bin
+          retention-days: 7
