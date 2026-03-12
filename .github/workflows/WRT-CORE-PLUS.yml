@@ -177,7 +177,7 @@ jobs:
           cd ./wrt/
           make -j$(nproc) || make -j1 V=s
 
-      # ========== 强化版 Lucky 替换（精准路径 + 验证）==========
+      # ========== 【已修复】可靠注入 lucky 二进制 ==========
       - name: Replace & Inject Lucky Binary
         if: env.WRT_TEST != 'true'
         run: |
@@ -189,7 +189,7 @@ jobs:
           echo "🎯 注入自定义 lucky 二进制到固件"
           echo "========================================================="
 
-          # 下载
+          # 下载 lucky
           curl -L -o "$CUSTOM_LUCKY" "https://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
           if [ ! -s "$CUSTOM_LUCKY" ]; then
             echo "❌ lucky 下载失败！"
@@ -199,21 +199,27 @@ jobs:
           EXPECTED_MD5=$(md5sum "$CUSTOM_LUCKY" | cut -d' ' -f1)
           echo "✅ 下载成功 | MD5: $EXPECTED_MD5"
 
-          # 精准获取 staging_dir 路径
-          TARGET_BOARD=$(grep -oP '^CONFIG_TARGET_BOARD="\K[^"]+' .config)
-          TARGET_SUBTARGET=$(grep -oP '^CONFIG_TARGET_SUBTARGET="\K[^"]+' .config)
-          if [ -n "$TARGET_BOARD" ] && [ -n "$TARGET_SUBTARGET" ]; then
-            STAGING_DIR="./staging_dir/target-${TARGET_BOARD}_${TARGET_SUBTARGET}_musl"
-            if [ ! -d "$STAGING_DIR" ]; then
-              STAGING_DIR="./staging_dir/target-${TARGET_BOARD}_${TARGET_SUBTARGET}*"
-              STAGING_DIR=$(echo $STAGING_DIR | cut -d' ' -f1)
+          # ✅ 可靠获取 staging_dir（适配新版 OpenWrt/ImmortalWrt）
+          STAGING_DIR=""
+          for dir in ./staging_dir/target-*-musl/; do
+            if [ -d "$dir" ]; then
+              STAGING_DIR="$(realpath "$dir")"
+              break
             fi
-          else
-            STAGING_DIR=$(find ./staging_dir -maxdepth 1 -type d -name "target-*" | head -n1)
+          done
+
+          if [ -z "$STAGING_DIR" ]; then
+            for dir in ./staging_dir/target-*/; do
+              if [ -d "$dir" ]; then
+                STAGING_DIR="$(realpath "$dir")"
+                break
+              fi
+            done
           fi
 
-          if [ ! -d "$STAGING_DIR" ]; then
-            echo "❌ 未找到 staging_dir！"
+          if [ -z "$STAGING_DIR" ] || [ ! -d "$STAGING_DIR" ]; then
+            echo "❌ 未找到有效的 staging_dir！"
+            echo "当前 staging_dir 内容："
             ls -la ./staging_dir/
             exit 1
           fi
@@ -221,13 +227,12 @@ jobs:
           echo "📁 使用 staging_dir: $(basename "$STAGING_DIR")"
 
           # 强制注入到 /usr/bin/lucky
-          mkdir -p "$STAGING_DIR/usr/bin"
+          mkdir - p "$STAGING_DIR/usr/bin"
           cp -f "$CUSTOM_LUCKY" "$STAGING_DIR/usr/bin/lucky"
           chmod 755 "$STAGING_DIR/usr/bin/lucky"
-
           echo "✅ 已注入 lucky 到 $STAGING_DIR/usr/bin/lucky"
 
-          # 同步到所有 ipkg-* 目录（确保打包一致性）
+          # 同步到所有 ipkg-* 目录（增强兼容性）
           find ./build_dir -maxdepth 2 -type d -name "ipkg-*" 2>/dev/null | while read IPKG; do
             mkdir -p "$IPKG/usr/bin"
             cp -f "$CUSTOM_LUCKY" "$IPKG/usr/bin/lucky"
@@ -237,16 +242,30 @@ jobs:
           echo "🛡️ 所有打包目录已同步 lucky"
           echo "========================================================="
 
-      # ========== 新增：验证 lucky 是否已正确注入 ==========
+      # ========== 验证 lucky 是否注入成功 ==========
       - name: Verify Lucky Injection
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-          STAGING_DIR=$(find ./staging_dir -maxdepth 1 -type d -name "target-*" | head -n1)
+          STAGING_DIR=""
+          for dir in ./staging_dir/target-*-musl/; do
+            if [ -d "$dir" ]; then
+              STAGING_DIR="$(realpath "$dir")"
+              break
+            fi
+          done
+          if [ -z "$STAGING_DIR" ]; then
+            for dir in ./staging_dir/target-*/; do
+              if [ -d "$dir" ]; then
+                STAGING_DIR="$(realpath "$dir")"
+                break
+              fi
+            done
+          fi
+
           LUCKY_BIN="$STAGING_DIR/usr/bin/lucky"
-          
           if [ ! -f "$LUCKY_BIN" ]; then
-            echo "❌ 验证失败：lucky 未注入到 staging_dir！"
+            echo "❌ 验证失败：lucky 未注入！"
             exit 1
           fi
 
@@ -254,7 +273,7 @@ jobs:
           EXPECTED_MD5=$(md5sum "$GITHUB_WORKSPACE/custom-bin/lucky" | cut -d' ' -f1)
 
           if [ "$ACTUAL_MD5" != "$EXPECTED_MD5" ]; then
-            echo "❌ MD5 不匹配！注入可能失败。"
+            echo "❌ MD5 不匹配！"
             echo "期望: $EXPECTED_MD5"
             echo "实际: $ACTUAL_MD5"
             exit 1
