@@ -44,7 +44,6 @@ jobs:
           echo "LUCKY_SHA256=$(sha256sum lucky_custom | cut -d' ' -f1)" >> $GITHUB_ENV
 
       - name: Parse Release Tags
-      - name: Parse Release Tags
         id: parse
         run: |
           # 将多行输入转换为数组，并显示将要处理的 tags
@@ -147,7 +146,8 @@ jobs:
               ASSETS=$(jq -r '.assets[] | select(.name | endswith(".bin") or endswith(".ubi")) | .browser_download_url' release_info.json)
             else
               # 使用指定的过滤模式
-              ASSETS=$(jq -r ".assets[] | select(.name | contains(\"${FILTER_PATTERN//\*/}\")) | .browser_download_url" release_info.json)
+              PATTERN=$(echo "$FILTER_PATTERN" | sed 's/\*/.*/g')
+              ASSETS=$(jq -r ".assets[] | select(.name | test(\"$PATTERN\")) | .browser_download_url" release_info.json)
             fi
             
             FIRMWARE_COUNT=0
@@ -247,14 +247,15 @@ jobs:
         run: |
           echo "## 🎯 Lucky 注入结果" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Release | 状态 | 固件数量 |" >> $GITHUB_STEP_SUMMARY
-          echo "|---------|------|----------|" >> $GITHUB_STEP_SUMMARY
-          
-          # 这里可以添加更详细的统计
-          echo "| ${{ inputs.release_tags }} | ✅ 完成 | $(ls output/ | wc -l) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 结果 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 处理的 Release | ${{ steps.parse.outputs.count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 生成的固件数量 | $(ls output/ | wc -l) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lucky 大小 | ${{ env.LUCKY_SIZE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lucky SHA256 | ${{ env.LUCKY_SHA256 }} |" >> $GITHUB_STEP_SUMMARY
           
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 📦 生成的文件" >> $GITHUB_STEP_SUMMARY
-          ls -la output/ | while read line; do
-            echo "  - $line" >> $GITHUB_STEP_SUMMARY
-          done
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -la output/ >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
