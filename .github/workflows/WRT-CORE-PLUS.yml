@@ -187,6 +187,198 @@ jobs:
 
           make -j$(nproc) || make -j1 V=s
 
+      # ========== 强化版：强制替换 lucky 二进制（确保 /usr/bin/lucky）==========
+      - name: Force Replace Lucky Binary
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          
+          # 创建临时目录存放下载的 lucky 二进制
+          mkdir -p $GITHUB_WORKSPACE/custom-bin
+          CUSTOM_LUCKY="$GITHUB_WORKSPACE/custom-bin/lucky"
+          TARGET_ARCH="target-aarch64_cortex-a53_musl"
+          
+          echo "========================================================="
+          echo "🎯 目标: 确保 /usr/bin/lucky 被替换为自定义版本"
+          echo "下载地址: http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
+          echo "========================================================="
+          
+          # 下载 lucky 二进制文件
+          echo "📥 正在下载 lucky 二进制文件..."
+          curl -L -o "$CUSTOM_LUCKY" "http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
+          
+          # 检查下载是否成功
+          if [ ! -f "$CUSTOM_LUCKY" ] || [ ! -s "$CUSTOM_LUCKY" ]; then
+            echo "❌ 错误: lucky 二进制文件下载失败"
+            exit 1
+          fi
+          
+          # 设置执行权限
+          chmod +x "$CUSTOM_LUCKY"
+          
+          echo "✅ lucky 二进制文件下载成功"
+          echo "   📊 文件大小: $(ls -lh "$CUSTOM_LUCKY" | awk '{print $5}')"
+          echo "   🔑 文件MD5: $(md5sum "$CUSTOM_LUCKY" | cut -d' ' -f1)"
+          echo "   📁 文件路径: $CUSTOM_LUCKY"
+          echo "========================================================="
+          
+          echo "🔍 开始强制替换所有位置的 lucky 二进制..."
+          echo "🎯 目标架构: $TARGET_ARCH"
+          echo "🎯 目标路径: /usr/bin/lucky"
+          
+          # 初始化替换计数器
+          REPLACE_COUNT=0
+          FAIL_COUNT=0
+          
+          # 创建一个临时文件记录所有需要替换的位置
+          TARGETS_FILE=$(mktemp)
+          
+          # 1. 最关键：替换 staging_dir 中的 lucky（最终打包位置）
+          echo "📌 [第1步] 查找 staging_dir 中的 /usr/bin/lucky..."
+          find ./staging_dir -path "*/usr/bin/lucky" -type f 2>/dev/null >> "$TARGETS_FILE" || true
+          
+          # 2. 替换 ipkg-install 中的 lucky（打包中间目录）
+          echo "📌 [第2步] 查找 ipkg-install 中的 /usr/bin/lucky..."
+          find ./build_dir -path "*/ipkg-install/usr/bin/lucky" -type f 2>/dev/null >> "$TARGETS_FILE" || true
+          
+          # 3. 替换所有 ipkg-* 打包目录中的 lucky
+          echo "📌 [第3步] 查找 ipkg 打包目录中的 /usr/bin/lucky..."
+          find ./build_dir -path "*/ipkg-*/usr/bin/lucky" -type f 2>/dev/null >> "$TARGETS_FILE" || true
+          
+          # 4. 查找所有名为 lucky 的 ELF 文件（防止残留）
+          echo "📌 [第4步] 查找所有名为 lucky 的 ELF 文件..."
+          find ./build_dir -name "lucky" -type f 2>/dev/null | while read BIN; do
+            if file "$BIN" | grep -q "ELF"; then
+              echo "$BIN" >> "$TARGETS_FILE"
+            fi
+          done
+          
+          # 5. 特别检查：如果以上都没找到，尝试搜索整个 build_dir 和 staging_dir
+          echo "📌 [第5步] 执行最终全面搜索..."
+          find ./build_dir ./staging_dir -name "lucky" -type f 2>/dev/null | while read BIN; do
+            if file "$BIN" | grep -q "ELF"; then
+              # 去重检查
+              if ! grep -q "^$BIN$" "$TARGETS_FILE" 2>/dev/null; then
+                echo "$BIN" >> "$TARGETS_FILE"
+              fi
+            fi
+          done
+          
+          # 去重并替换所有找到的文件
+          echo "========================================================="
+          echo "🔨 开始替换 $(sort -u "$TARGETS_FILE" | wc -l) 个目标文件..."
+          
+          sort -u "$TARGETS_FILE" | while read BIN; do
+            if [ -f "$BIN" ]; then
+              echo "   🔄 替换: $BIN"
+              # 备份原始文件（可选）
+              cp "$BIN" "$BIN.bak" 2>/dev/null || true
+              # 替换为自定义二进制
+              cp -f "$CUSTOM_LUCKY" "$BIN"
+              chmod 755 "$BIN"
+              REPLACE_COUNT=$((REPLACE_COUNT + 1))
+              
+              # 验证单个文件
+              NEW_MD5=$(md5sum "$BIN" | cut -d' ' -f1)
+              if [ "$NEW_MD5" = "$(md5sum "$CUSTOM_LUCKY" | cut -d' ' -f1)" ]; then
+                echo "     ✅ 验证成功"
+              else
+                echo "     ❌ 验证失败"
+                FAIL_COUNT=$((FAIL_COUNT + 1))
+              fi
+            fi
+          done
+          
+          rm -f "$TARGETS_FILE"
+          
+          echo "========================================================="
+          echo "📊 替换统计:"
+          echo "   ✅ 成功替换: $REPLACE_COUNT 个文件"
+          echo "   ❌ 失败: $FAIL_COUNT 个文件"
+          echo "========================================================="
+          
+          # 验证最终结果 - 检查 staging_dir 中的 /usr/bin/lucky
+          echo "🔍 最终验证: 检查 staging_dir 中的 /usr/bin/lucky"
+          
+          FINAL_LUCKY="./staging_dir/$TARGET_ARCH/usr/bin/lucky"
+          FINAL_LUCKY_ALT=$(find ./staging_dir -path "*/usr/bin/lucky" -type f 2>/dev/null | head -1)
+          
+          # 优先使用标准路径，如果没有则使用找到的第一个
+          if [ -f "$FINAL_LUCKY" ]; then
+            CHECK_FILE="$FINAL_LUCKY"
+          elif [ -n "$FINAL_LUCKY_ALT" ]; then
+            CHECK_FILE="$FINAL_LUCKY_ALT"
+            echo "⚠️ 注意: 使用替代路径: $CHECK_FILE"
+          else
+            CHECK_FILE=""
+            echo "❌ 错误: 在 staging_dir 中未找到任何 lucky 文件！"
+          fi
+          
+          if [ -n "$CHECK_FILE" ] && [ -f "$CHECK_FILE" ]; then
+            echo "✅ 找到 lucky 文件: $CHECK_FILE"
+            echo "   📊 文件大小: $(ls -lh "$CHECK_FILE" | awk '{print $5}')"
+            echo "   🔑 文件MD5: $(md5sum "$CHECK_FILE" | cut -d' ' -f1)"
+            echo "   🔑 预期MD5: $(md5sum "$CUSTOM_LUCKY" | cut -d' ' -f1)"
+            
+            # 验证是否替换成功
+            CUSTOM_MD5=$(md5sum "$CUSTOM_LUCKY" | cut -d' ' -f1)
+            FINAL_MD5=$(md5sum "$CHECK_FILE" | cut -d' ' -f1)
+            
+            if [ "$CUSTOM_MD5" = "$FINAL_MD5" ]; then
+              echo "========================================================="
+              echo "🎉🎉🎉 成功！lucky 已正确替换到 /usr/bin/ 目录！ 🎉🎉🎉"
+              echo "========================================================="
+            else
+              echo "========================================================="
+              echo "❌❌❌ 失败！lucky 替换后 MD5 不匹配！ ❌❌❌"
+              echo "   可能的原因:"
+              echo "   - 文件权限问题"
+              echo "   - 文件被其他进程锁定"
+              echo "   - 磁盘空间不足"
+              echo "========================================================="
+              exit 1
+            fi
+          else
+            echo "========================================================="
+            echo "⚠️⚠️⚠️ 警告: 未找到 staging_dir 中的 lucky 文件 ⚠️⚠️⚠️"
+            echo "   可能的原因:"
+            echo "   - lucky 没有编译进固件"
+            echo "   - lucky 的包名不同（可能是其他名称）"
+            echo "   - lucky 的安装路径不是 /usr/bin/lucky"
+            echo ""
+            echo "   正在搜索所有可能的 lucky 相关文件..."
+            find ./staging_dir -name "lucky*" -type f 2>/dev/null | while read F; do
+              echo "      - $F"
+            done
+            echo "========================================================="
+            
+            # 如果没找到，但确实应该存在，这里不退出，让工作流继续
+            # 但会留下明显的警告
+          fi
+          
+          # 额外保障：手动确保 /usr/bin/lucky 存在
+          echo "🛡️ 额外保障: 手动确保 staging_dir 中的 /usr/bin/lucky 存在..."
+          
+          # 确定正确的 staging_dir 路径
+          STAGING_DIR=$(find ./staging_dir -maxdepth 1 -type d -name "target-*" 2>/dev/null | head -1)
+          if [ -n "$STAGING_DIR" ]; then
+            mkdir -p "$STAGING_DIR/usr/bin"
+            cp -f "$CUSTOM_LUCKY" "$STAGING_DIR/usr/bin/lucky" 2>/dev/null || true
+            chmod 755 "$STAGING_DIR/usr/bin/lucky" 2>/dev/null || true
+            echo "   ✅ 已确保 $STAGING_DIR/usr/bin/lucky 存在"
+          fi
+          
+          # 查找并确保所有 ipkg-* 目录中也有
+          find ./build_dir -maxdepth 2 -type d -name "ipkg-*" 2>/dev/null | while read IPKG_DIR; do
+            if [ -d "$IPKG_DIR" ]; then
+              mkdir -p "$IPKG_DIR/usr/bin"
+              cp -f "$CUSTOM_LUCKY" "$IPKG_DIR/usr/bin/lucky" 2>/dev/null || true
+              chmod 755 "$IPKG_DIR/usr/bin/lucky" 2>/dev/null || true
+              echo "   ✅ 已确保 $IPKG_DIR/usr/bin/lucky 存在"
+            fi
+          done
+      # ========== 替换步骤结束 ==========
+
       - name: Machine Information
         run: |
           cd ./wrt/
