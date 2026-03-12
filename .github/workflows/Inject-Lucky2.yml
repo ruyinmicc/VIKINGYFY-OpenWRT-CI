@@ -1,200 +1,154 @@
-      - name: Process Release and Inject Lucky
+name: Inject Lucky into IPQ60xx Sysupgrade (Manual Tag + Custom Lucky URL)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release Tag (e.g., main-26.03.11-23.53.36)'
+        required: true
+        type: string
+      lucky_url:
+        description: 'URL to aarch64 lucky binary'
+        required: false
+        type: string
+        default: 'http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0'
+
+jobs:
+  inject-lucky:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 🛠️ Checkout repository
+        uses: actions/checkout@v4
+
+      - name: 📥 Install dependencies
         run: |
-          # 安装 pv 用于进度显示
-          sudo apt-get install -y pv >/dev/null 2>&1 || true
-          
+          sudo apt-get update
+          sudo apt-get install -y binutils squashfs-tools cpio gzip jq
+
+      - name: 🔧 Download and verify Lucky binary
+        env:
+          LUCKY_URL: ${{ github.event.inputs.lucky_url }}
+        run: |
+          mkdir -p lucky
+          echo "📥 Downloading lucky from: $LUCKY_URL"
+          curl -fL --retry 3 --retry-delay 5 "$LUCKY_URL" -o lucky/lucky
+          chmod +x lucky/lucky
+          echo "🔍 Verifying architecture..."
+          file lucky/lucky
+          if ! file lucky/lucky | grep -q "aarch64"; then
+            echo "❌ ERROR: lucky is not aarch64! Injection will fail on IPQ60xx."
+            exit 1
+          fi
+
+      - name: 📦 Download sysupgrade firmware by tag
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${RELEASE_TAG}"
+          OWNER="VIKINGYFY"
+          REPO="OpenWRT-CI"
+
+          echo "📡 Fetching release info for tag: $TAG"
+          RELEASE_INFO=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$OWNER/$REPO/releases/tags/$TAG")
+
+          if [[ $(echo "$RELEASE_INFO" | jq -r '.message // empty') == "Not Found" ]]; then
+            echo "❌ Release tag '$TAG' not found in $OWNER/$REPO"
+            exit 1
+          fi
+
+          # Match IPQ60xx sysupgrade firmware (case-insensitive)
+          ASSET_NAME=$(echo "$RELEASE_INFO" | jq -r '.assets[] | select(.name | test("ipq60xx.*sysupgrade.*\\.bin$"; "i")) .name' | head -n1)
+
+          if [ -z "$ASSET_NAME" ]; then
+            echo "❌ No IPQ60xx sysupgrade firmware found in release '$TAG'"
+            echo "Available assets:"
+            echo "$RELEASE_INFO" | jq -r '.assets[].name'
+            exit 1
+          fi
+
+          DOWNLOAD_URL="https://github.com/$OWNER/$REPO/releases/download/$TAG/$ASSET_NAME"
+          echo "📥 Downloading firmware: $ASSET_NAME"
+          wget -O firmware.bin "$DOWNLOAD_URL"
+
+      - name: ⚙️ Inject Lucky into firmware (IPQ60xx compatible)
+        run: |
           set -eo pipefail
-          mkdir -p output
+          FIRMWARE="firmware.bin"
+          OUTPUT_DIR="output"
+          WORK_DIR="work"
 
-          mapfile -t TAGS <<< "${{ inputs.release_tags }}"
-          
-          for TAG in "${TAGS[@]}"; do
-            TAG=$(echo "$TAG" | xargs)
-            [ -z "$TAG" ] && continue
+          mkdir -p "$OUTPUT_DIR" "$WORK_DIR"
+          cp "$FIRMWARE" "$WORK_DIR/"
+          cp -r lucky/ "$WORK_DIR/"
 
-            echo ""
-            echo "========================================="
-            echo "📦 处理 Release: $TAG"
-            echo "========================================="
+          cd "$WORK_DIR"
 
-            WORK_DIR="work_$(date +%s)_$$"
-            mkdir -p "$WORK_DIR"
-            cd "$WORK_DIR"
+          # Step 1: Find TRAILER!!! offset
+          OFFSET=$(grep -a -b -o 'TRAILER!!!' "$FIRMWARE" | head -n1 | cut -d: -f1)
+          if [ -z "$OFFSET" ]; then
+            echo "❌ TRAILER!!! marker not found — invalid OpenWrt sysupgrade format"
+            exit 1
+          fi
+          echo "OffsetTable offset: $OFFSET"
 
-            # 下载 release 信息
-            echo "📡 获取 release 信息..."
-            RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
-            if ! curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -o release.json "$RELEASE_URL" -w "%{http_code}" | grep -q "200"; then
-              echo "❌ Release 不存在或无权限"
-              cd .. && rm -rf "$WORK_DIR"
-              continue
-            fi
+          # Step 2: Extract payload
+          PAYLOAD_START=$((OFFSET + 10))
+          tail -c +$PAYLOAD_START "$FIRMWARE" | gunzip | cpio -i
 
-            # 获取固件总数
-            TOTAL_FIRMWARES=$(jq -r '.assets[] | select(.name | endswith(".bin")) | .name' release.json | wc -l)
-            CURRENT=0
+          if [ ! -f root.squashfs ]; then
+            echo "❌ root.squashfs not found in firmware"
+            exit 1
+          fi
 
-            # 遍历所有 .bin 固件
-            jq -r '.assets[] | select(.name | endswith(".bin")) | .browser_download_url' release.json | while read -r URL; do
-              [ -z "$URL" ] && continue
-              CURRENT=$((CURRENT + 1))
-              FILENAME=$(basename "$URL")
-              
-              echo ""
-              echo "─────────────────────────────────────────"
-              echo "📥 [$CURRENT/$TOTAL_FIRMWARES] 下载固件: $FILENAME"
-              echo "─────────────────────────────────────────"
-              
-              # 下载显示进度
-              curl -L --progress-bar -o "$FILENAME" "$URL"
-              
-              if [ ! -s "$FILENAME" ]; then
-                echo "⚠️ 固件下载失败"
-                continue
-              fi
+          # Step 3: Unpack and inject
+          unsquashfs root.squashfs
+          cp lucky/lucky squashfs-root/usr/bin/
+          chmod +x squashfs-root/usr/bin/lucky
 
-              echo ""
-              echo "🔧 注入 lucky 到: $FILENAME"
-              echo ""
+          # Create init script
+          cat > squashfs-root/etc/init.d/lucky << 'EOF'
+#!/bin/sh /etc/rc.common
+START=99
+USE_PROCD=1
 
-              # 搜索签名
-              echo -n "  🔍 搜索 squashfs 签名... "
-              OFFSET=""
-              if [ -s "$FILENAME" ]; then
-                HSQS_OFF=$(dd if="$FILENAME" bs=1M count=256 2>/dev/null | grep -aob $'\x68\x73\x71\x73' | head -1 | cut -d: -f1 || true)
-                SQSH_OFF=$(dd if="$FILENAME" bs=1M count=256 2>/dev/null | grep -aob $'\x73\x71\x73\x68' | head -1 | cut -d: -f1 || true)
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/lucky
+    procd_set_param respawn
+    procd_close_instance
+}
+EOF
+          chmod +x squashfs-root/etc/init.d/lucky
+          ln -sf ../init.d/lucky squashfs-root/etc/rc.d/S99lucky
 
-                if [ -n "$HSQS_OFF" ]; then
-                  OFFSET=$HSQS_OFF
-                  echo "✅ 找到 hsqs"
-                elif [ -n "$SQSH_OFF" ]; then
-                  OFFSET=$SQSH_OFF
-                  echo "✅ 找到 sqsh"
-                else
-                  echo "❌ 未找到"
-                  continue
-                fi
-              fi
+          # Step 4: Repack rootfs
+          mksquashfs squashfs-root/ new-root.squashfs -comp xz -noappend -always-use-fragments
 
-              OFFSET_HEX=$(printf "%08x" $OFFSET)
-              echo "  📍 偏移量: $OFFSET (0x$OFFSET_HEX)"
+          # Step 5: Repack sysupgrade
+          find . -maxdepth 1 -type f \
+            ! -name "root.squashfs" \
+            ! -name "squashfs-root" \
+            ! -name "lucky" \
+            ! -name "*.bin" \
+            -print0 | \
+          cpio -o -H newc --null | gzip -9 > new.cpio.gz
 
-              # 计算提取参数
-              BLOCK_SIZE=1048576
-              SKIP_BLOCKS=$(( ${OFFSET} / ${BLOCK_SIZE} ))
-              REMAINDER=$(( ${OFFSET} % ${BLOCK_SIZE} ))
-              : ${SKIP_BLOCKS:=0}
-              : ${REMAINDER:=0}
+          # Reconstruct full firmware
+          dd if="$FIRMWARE" bs=1 count="$OFFSET" of=header.bin 2>/dev/null
+          cat header.bin new.cpio.gz > "../$OUTPUT_DIR/${FIRMWARE%.bin}-lucky.bin"
 
-              echo "  💾 提取 squashfs (skip=${SKIP_BLOCKS}M, offset=${REMAINDER}B)"
+          echo "✅ Lucky injected successfully!"
 
-              # 提取 squashfs（带进度）
-              if command -v pv >/dev/null 2>&1; then
-                # 使用 pv 显示进度
-                EXTRACT_SIZE=$(($(stat -c%s "$FILENAME") - OFFSET))
-                if [ "$REMAINDER" -eq 0 ]; then
-                  dd if="$FILENAME" bs=1M skip="$SKIP_BLOCKS" 2>/dev/null | \
-                    pv -s "$EXTRACT_SIZE" -N "  提取" > root.squashfs
-                else
-                  dd if="$FILENAME" bs=1M skip="$SKIP_BLOCKS" 2>/dev/null | \
-                    dd bs=1 skip="$REMAINDER" 2>/dev/null | \
-                    pv -s "$EXTRACT_SIZE" -N "  提取" > root.squashfs
-                fi
-              else
-                # 使用 dd 的简单进度
-                if [ "$REMAINDER" -eq 0 ]; then
-                  dd if="$FILENAME" of=root.squashfs bs=1M skip="$SKIP_BLOCKS" 2>&1 | \
-                    grep -E "records|bytes" | sed 's/^/    /'
-                else
-                  dd if="$FILENAME" bs=1M skip="$SKIP_BLOCKS" 2>/dev/null | \
-                    dd bs=1 skip="$REMAINDER" of=root.squashfs 2>&1 | \
-                    grep -E "records|bytes" | sed 's/^/    /'
-                fi
-              fi
+      - name: 📤 Upload injected firmware as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucky-firmware-${{ github.event.inputs.release_tag }}
+          path: output/
+          retention-days: 7
 
-              # 验证
-              echo -n "  ✅ 验证 squashfs... "
-              if ! unsquashfs -s root.squashfs >/dev/null 2>&1; then
-                echo "❌ 无效"
-                continue
-              fi
-              echo "有效 (大小: $(du -h root.squashfs | cut -f1))"
-
-              # 解包
-              echo -n "  📦 解包文件系统... "
-              rm -rf squashfs-root
-              if ! unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1; then
-                echo "❌ 失败"
-                continue
-              fi
-              echo "✅ 完成"
-
-              # 下载 lucky
-              echo -n "  🌐 下载 lucky... "
-              LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
-              if ! curl -L --progress-bar -o /tmp/lucky_custom "$LUCKY_URL"; then
-                echo "❌ 失败"
-                continue
-              fi
-              chmod 755 /tmp/lucky_custom
-              echo "✅ $(du -h /tmp/lucky_custom | cut -f1)"
-
-              # 注入
-              mkdir -p squashfs-root/usr/bin
-              cp /tmp/lucky_custom squashfs-root/usr/bin/lucky
-              echo "  ✅ lucky 已注入"
-
-              # 获取压缩参数
-              COMP=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
-              BLOCK=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
-              [ -z "$COMP" ] && COMP="xz"
-              [ -z "$BLOCK" ] && BLOCK="262144"
-              echo "  🛠️ 压缩: $COMP, 块大小: $BLOCK"
-
-              # 重打包
-              echo -n "  🔄 重打包文件系统... "
-              mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend -quiet
-              if [ ! -f new-root.squashfs ]; then
-                echo "❌ 失败"
-                continue
-              fi
-              echo "✅ $(du -h new-root.squashfs | cut -f1)"
-
-              ORIG_SIZE=$(stat -c%s root.squashfs)
-              NEW_SIZE=$(stat -c%s new-root.squashfs)
-              echo "  📊 原始大小: $(numfmt --to=iec $ORIG_SIZE), 新大小: $(numfmt --to=iec $NEW_SIZE)"
-              
-              if [ $NEW_SIZE -gt $ORIG_SIZE ]; then
-                echo "  ⚠️ 新镜像大了 $(numfmt --to=iec $((NEW_SIZE - ORIG_SIZE)))"
-              fi
-
-              # 拼接
-              echo -n "  🔗 拼接新固件... "
-              NEW_FW="lucky-$FILENAME"
-              if [ "$REMAINDER" -eq 0 ]; then
-                dd if="$FILENAME" of="$NEW_FW" bs=1M count="$SKIP_BLOCKS" status=none 2>/dev/null
-              else
-                dd if="$FILENAME" of="$NEW_FW" bs=1M count="$SKIP_BLOCKS" status=none 2>/dev/null
-                dd if="$FILENAME" bs=1M skip="$SKIP_BLOCKS" count=1 status=none 2>/dev/null | \
-                dd bs=1 count="$REMAINDER" status=none 2>/dev/null >> "$NEW_FW"
-              fi
-              cat new-root.squashfs >> "$NEW_FW"
-
-              if [ -s "$NEW_FW" ]; then
-                cp "$NEW_FW" "$GITHUB_WORKSPACE/output/"
-                echo "✅ 完成"
-                echo "  ✅ 生成: lucky-$FILENAME ($(du -h "$NEW_FW" | cut -f1))"
-              else
-                echo "❌ 失败"
-              fi
-
-              # 清理
-              rm -f "$FILENAME" root.squashfs new-root.squashfs "$NEW_FW" /tmp/lucky_custom
-              rm -rf squashfs-root
-              echo ""
-            done
-
-            cd ..
-            rm -rf "$WORK_DIR"
-          done
+      - name: 📝 Final summary
+        run: |
+          echo "🎉 Done! Lucky injected for tag: ${{ github.event.inputs.release_tag }}"
+          ls -lh output/
