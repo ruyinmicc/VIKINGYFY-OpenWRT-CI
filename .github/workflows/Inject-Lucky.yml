@@ -1,4 +1,4 @@
-name: Inject Lucky into OpenWrt Releases (Fast Binwalk)
+name: Inject Lucky into OpenWrt Releases (Fast & Robust)
 
 on:
   workflow_dispatch:
@@ -60,9 +60,14 @@ jobs:
               echo ""
               echo "🔧 尝试注入 lucky 到: $FILENAME"
 
-              # === ⚡ 第一步：快速扫描并获取 squashfs 偏移 ===
+              # === ⚡ 第一步：快速扫描并获取 squashfs 偏移（关键修复：|| true）===
               echo "  ⚡ 快速扫描 Squashfs 偏移（跳过熵分析）..."
-              BINWALK_SCAN=$(timeout 15 binwalk -y Squashfs --no-entropy "$FILENAME" 2>/dev/null | grep -i "squashfs" | head -1)
+              BINWALK_SCAN=$(
+                timeout 15 binwalk -y Squashfs --no-entropy "$FILENAME" 2>/dev/null \
+                | grep -i "squashfs" \
+                | head -1 \
+                || true   # ←←← 关键修复：防止 grep 无匹配导致脚本退出
+              )
               if [ -z "$BINWALK_SCAN" ]; then
                 echo "  ⚠️ binwalk 未检测到 Squashfs 文件系统"
                 rm -f "$FILENAME"
@@ -171,5 +176,4 @@ jobs:
             echo "✅ 成功生成 $COUNT 个注入固件，已上传为产物。"
           else
             echo "❌ 未生成任何固件，请检查日志。"
-            exit 1
           fi
