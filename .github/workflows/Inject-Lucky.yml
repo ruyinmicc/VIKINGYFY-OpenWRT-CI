@@ -1,5 +1,4 @@
-name: Inject Lucky into Specific Releases
-
+name: Inject-lucky
 on:
   workflow_dispatch:
     inputs:
@@ -30,15 +29,15 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools curl jq file binwalk
+          sudo apt-get install -y squashfs-tools curl jq
 
       - name: Download Lucky Binary
         run: |
           LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
           curl -L --retry 3 --progress-bar -o lucky_custom "$LUCKY_URL"
           chmod 755 lucky_custom
-          echo "LUCKY_SIZE=$(du -h lucky_custom | cut -f1)" >> $GITHUB_ENV
-          echo "LUCKY_SHA256=$(sha256sum lucky_custom | cut -d' ' -f1)" >> $GITHUB_ENV
+          echo "LUCKY_SIZE=$(du -h lucky_custom | cut -f1)" >> "$GITHUB_ENV"
+          echo "LUCKY_SHA256=$(sha256sum lucky_custom | cut -d' ' -f1)" >> "$GITHUB_ENV"
           echo "✅ Lucky binary downloaded: $(file lucky_custom | cut -d: -f2-)"
 
       - name: Parse Release Tags
@@ -58,7 +57,7 @@ jobs:
             echo "$TAGS"
             echo "EOF"
             echo "count=$COUNT"
-          } >> $GITHUB_OUTPUT
+          } >> "$GITHUB_OUTPUT"
 
       - name: Set Firmware Filter
         id: filter
@@ -67,7 +66,7 @@ jobs:
             "sysupgrade only") echo "pattern=sysupgrade"; echo "desc=仅处理 sysupgrade 固件" ;;
             "factory only")   echo "pattern=factory";   echo "desc=仅处理 factory 固件" ;;
             *)                echo "pattern=.*";        echo "desc=处理所有固件" ;;
-          esac >> $GITHUB_OUTPUT
+          esac >> "$GITHUB_OUTPUT"
           echo "🔍 过滤规则：${{ steps.filter.outputs.desc }}"
 
       - name: Process Each Release
@@ -101,11 +100,11 @@ jobs:
               continue
             fi
 
-            # 下载匹配固件
+            # 下载匹配的 .bin 固件（排除 .ubi）
             PATTERN="${{ steps.filter.outputs.pattern }}"
-            ASSETS=$(jq -r ".assets[] | select(.name | test(\".*($PATTERN).*\\\\.(bin|ubi)$\")) | .browser_download_url" release_info.json)
+            ASSETS=$(jq -r ".assets[] | select(.name | test(\".*($PATTERN).*\\\\.bin$\")) | .browser_download_url" release_info.json)
             if [ -z "$ASSETS" ]; then
-              echo "⚠️ 未找到匹配固件"
+              echo "⚠️ 未找到匹配的 .bin 固件"
               cd .. && rm -rf "$WORK_DIR"
               continue
             fi
@@ -127,155 +126,74 @@ jobs:
               continue
             fi
 
-            # 启用 nullglob 避免 *.bin 字面返回
+            # 处理每个 .bin 固件
             shopt -s nullglob
             INJECT_COUNT=0
-            for FW in *.bin *.ubi; do
+            for FW in *.bin; do
               [ -f "$FW" ] || continue
               echo ""
               echo "🔧 正在注入 lucky 到: $FW"
 
-              # === 修复 binwalk 提取问题 ===
-              echo "🔍 方法1: 使用 binwalk 提取 (详细模式)..."
-              mkdir -p extracted
-              
-              # 方法1: 使用 binwalk 提取
-              if binwalk -Me --run-as=root "$FW" > binwalk.log 2>&1; then
-                echo "  ✅ binwalk 提取完成"
-                
-                # 查找提取的 squashfs 文件
-                SQUASH_FILE=""
-                for f in $(find extracted -type f 2>/dev/null); do
-                  if file "$f" 2>/dev/null | grep -q "Squashfs filesystem"; then
-                    SQUASH_FILE="$f"
-                    echo "  ✅ 找到 squashfs: $(basename "$SQUASH_FILE")"
-                    break
-                  fi
-                done
-              else
-                echo "  ⚠️ binwalk 提取失败，尝试其他方法..."
+              # === 查找 squashfs 签名 (hsqs 或 sqsh) ===
+              echo "🔍 搜索 squashfs 签名 (hsqs/sqsh)..."
+              OFFSET_HEX=$(hexdump -C "$FW" | grep -E -m1 ' 68 73 71 73 | 73 71 73 68 ' | head -1 | awk '{print $1}')
+              if [ -z "$OFFSET_HEX" ]; then
+                echo "  ⚠️ 未找到 squashfs 签名 (hsqs/sqsh)"
+                continue
               fi
+              OFFSET=$((0x$OFFSET_HEX))
+              echo "  📍 找到 squashfs 偏移: $OFFSET (0x$OFFSET_HEX)"
 
-              # 方法2: 直接查找 squashfs 签名
-              if [ -z "$SQUASH_FILE" ]; then
-                echo "🔍 方法2: 直接查找 squashfs 签名..."
-                
-                # 查找 hsqs 签名并提取
-                OFFSET=$(grep -F -a -b -o 'hsqs' "$FW" 2>/dev/null | head -1 | awk -F: '{print $1}')
-                if [ -n "$OFFSET" ]; then
-                  OFFSET=$((OFFSET - 4))
-                  echo "  找到 hsqs 签名，偏移量: $OFFSET"
-                  
-                  # 提取 squashfs
-                  dd if="$FW" of=root.squashfs bs=$OFFSET skip=1 2>/dev/null
-                  
-                  if [ -s root.squashfs ] && unsquashfs -s root.squashfs >/dev/null 2>&1; then
-                    SQUASH_FILE="root.squashfs"
-                    echo "  ✅ 成功提取 squashfs"
-                  fi
-                fi
-              fi
-
-              # 方法3: 尝试不同的 squashfs 签名
-              if [ -z "$SQUASH_FILE" ]; then
-                echo "🔍 方法3: 尝试其他签名..."
-                for sig in 'sqsh' 'hsq#' 'qshs'; do
-                  OFFSET=$(grep -F -a -b -o "$sig" "$FW" 2>/dev/null | head -1 | awk -F: '{print $1}')
-                  if [ -n "$OFFSET" ]; then
-                    OFFSET=$((OFFSET - 4))
-                    echo "  找到签名 $sig，偏移量: $OFFSET"
-                    
-                    dd if="$FW" of="root_${sig}.squashfs" bs=$OFFSET skip=1 2>/dev/null
-                    
-                    if [ -s "root_${sig}.squashfs" ] && unsquashfs -s "root_${sig}.squashfs" >/dev/null 2>&1; then
-                      SQUASH_FILE="root_${sig}.squashfs"
-                      echo "  ✅ 成功提取 squashfs"
-                      break
-                    fi
-                  fi
-                done
-              fi
-
-              # 方法4: 使用 unsquashfs 直接尝试
-              if [ -z "$SQUASH_FILE" ]; then
-                echo "🔍 方法4: 直接使用 unsquashfs 尝试..."
-                if unsquashfs -d unsquashfs-root "$FW" >/dev/null 2>&1; then
-                  if [ -d unsquashfs-root ]; then
-                    echo "  ✅ unsquashfs 直接解压成功"
-                    # 不需要 SQUASH_FILE，直接使用解压的目录
-                    mv unsquashfs-root squashfs-root
-                    # 注入 lucky
-                    mkdir -p squashfs-root/usr/bin
-                    cp "$GITHUB_WORKSPACE/lucky_custom" squashfs-root/usr/bin/lucky
-                    chmod 755 squashfs-root/usr/bin/lucky
-                    
-                    # 重新打包
-                    mksquashfs squashfs-root new-root.squashfs -comp xz -b 262144 >/dev/null 2>&1
-                    
-                    if [ -f new-root.squashfs ]; then
-                      # 获取原始固件大小
-                      ORIG_SIZE=$(stat -c%s "$FW")
-                      
-                      # 简单拼接（可能需要知道原始偏移）
-                      cp "$FW" "lucky-$FW"
-                      echo "  ✅ 已创建新固件，但可能需要手动调整"
-                      INJECT_COUNT=$((INJECT_COUNT + 1))
-                    fi
-                    continue
-                  fi
-                fi
-              fi
-
-              if [ -z "$SQUASH_FILE" ]; then
-                echo "  ❌ 所有方法都未能提取 squashfs"
+              # === 提取 squashfs ===
+              tail -c +$((OFFSET + 1)) "$FW" > root.squashfs
+              if [ ! -s root.squashfs ]; then
+                echo "  ⚠️ 提取的 squashfs 为空"
                 continue
               fi
 
-              echo "  ✅ 找到 squashfs: $(basename "$SQUASH_FILE")"
+              # 验证有效性
+              if ! unsquashfs -s root.squashfs >/dev/null 2>&1; then
+                echo "  ⚠️ 提取内容不是有效的 squashfs"
+                continue
+              fi
 
-              # 解包
-              unsquashfs -d squashfs-root "$SQUASH_FILE" >/dev/null 2>&1
+              # === 解包 ===
+              rm -rf squashfs-root
+              unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1
               if [ ! -d squashfs-root ]; then
                 echo "  ⚠️ 解包失败"
                 continue
               fi
 
-              # 注入 lucky
+              # === 注入 lucky ===
               mkdir -p squashfs-root/usr/bin
               cp "$GITHUB_WORKSPACE/lucky_custom" squashfs-root/usr/bin/lucky
               chmod 755 squashfs-root/usr/bin/lucky
-              echo "  ✅ lucky 已注入"
+              echo "  ✅ lucky 已注入到 /usr/bin/lucky"
 
-              # 获取原始压缩参数
-              COMP=$(unsquashfs -s "$SQUASH_FILE" 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
-              BLOCK=$(unsquashfs -s "$SQUASH_FILE" 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
+              # === 获取原始压缩参数 ===
+              COMP=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
+              BLOCK=$(unsquashfs -s root.squashfs 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
               [ -z "$COMP" ] && COMP="xz"
               [ -z "$BLOCK" ] && BLOCK="262144"
+              echo "  🛠️ 使用压缩: $COMP, 块大小: ${BLOCK}B"
 
-              # 重打包
-              mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend >/dev/null 2>&1
+              # === 重打包 ===
+              rm -f new-root.squashfs
+              mksquashfs squashfs-root new-root.squashfs -comp "$COMP" -b "$BLOCK" -noappend -quiet
               if [ ! -f new-root.squashfs ]; then
                 echo "  ⚠️ 重打包失败"
                 continue
               fi
 
-              ORIG_SIZE=$(stat -c%s "$SQUASH_FILE")
+              ORIG_SIZE=$(stat -c%s root.squashfs)
               NEW_SIZE=$(stat -c%s new-root.squashfs)
+              echo "  📊 原始大小: $ORIG_SIZE B, 新大小: $NEW_SIZE B"
               if [ $NEW_SIZE -gt $ORIG_SIZE ]; then
-                echo "  ⚠️ 新 squashfs 比原镜像大 $(($NEW_SIZE - $ORIG_SIZE)) 字节！可能无法刷写！"
+                echo "  ⚠️ 新镜像大了 $(($NEW_SIZE - ORIG_SIZE)) 字节！可能无法刷写！"
               fi
 
-              # 获取偏移量
-              OFFSET_LINE=$(binwalk "$FW" 2>/dev/null | grep -i squashfs | head -1)
-              if [ -n "$OFFSET_LINE" ]; then
-                OFFSET=$(echo "$OFFSET_LINE" | awk '{print $1}')
-              else
-                # 尝试从文件大小估算
-                OFFSET=$(( $(stat -c%s "$FW") - $(stat -c%s "$SQUASH_FILE") ))
-                echo "  估算偏移量: $OFFSET"
-              fi
-
-              # 拼接新固件
+              # === 拼接新固件 ===
               NEW_FW="lucky-$FW"
               head -c "$OFFSET" "$FW" > "$NEW_FW"
               cat new-root.squashfs >> "$NEW_FW"
@@ -290,8 +208,9 @@ jobs:
                 echo "  ⚠️ 新固件为空"
               fi
 
-              # 清理
-              rm -rf extracted unsquashfs-root squashfs-root new-root.squashfs *.squashfs "$NEW_FW" binwalk.log
+              # === 清理 ===
+              rm -f root.squashfs new-root.squashfs
+              rm -rf squashfs-root "$NEW_FW"
             done
 
             echo "📊 Release $TAG: $INJECT_COUNT/$FIRMWARE_COUNT 固件注入成功"
@@ -318,22 +237,22 @@ jobs:
 
       - name: Create Summary
         run: |
-          echo "## 🎯 Lucky 注入结果" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| 项目 | 结果 |" >> $GITHUB_STEP_SUMMARY
-          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 处理的 Release | ${{ steps.parse.outputs.count }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| 生成的固件数量 | $(ls output/ 2>/dev/null | wc -l) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Lucky 大小 | ${{ env.LUCKY_SIZE }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Lucky SHA256 | ${{ env.LUCKY_SHA256 }} |" >> $GITHUB_STEP_SUMMARY
+          echo "## 🎯 Lucky 注入结果" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 项目 | 结果 |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 处理的 Release | ${{ steps.parse.outputs.count }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 生成的固件数量 | $(ls output/ 2>/dev/null | wc -l) |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Lucky 大小 | ${{ env.LUCKY_SIZE }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Lucky SHA256 | ${{ env.LUCKY_SHA256 }} |" >> "$GITHUB_STEP_SUMMARY"
           
           if [ -d "output" ] && [ -n "$(ls -A output)" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### 📦 生成的文件" >> $GITHUB_STEP_SUMMARY
-            echo '```' >>  $GITHUB_STEP_SUMMARY
-            ls -la output/ >>  $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "### 📦 生成的文件" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> " $ GITHUB_STEP_SUMMARY"
+            ls -la output/ >> " $ GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "⚠️ 没有生成任何文件" >> $GITHUB_STEP_SUMMARY
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "⚠️ 没有生成任何文件" >> "$GITHUB_STEP_SUMMARY"
           fi
