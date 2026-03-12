@@ -1,4 +1,5 @@
-name: Inject-Lucky
+name: Inject Lucky into Specific Releases
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,8 +7,7 @@ on:
         description: |
           输入要处理的 Release Tags（一行一个）
           例如：
-          IPQ60XX-WIFI-YES-VIKINGYFY-main-26.03.12-07.36.30
-          IPQ60XX-WIFI-NO-VIKINGYFY-main-26.03.12-07.36.30
+          IPQ60XX-WIFI-YES-VIKINGYFY-main-26.03.11-23.53.36
         required: true
         type: string
       firmware_filter:
@@ -19,8 +19,6 @@ on:
           - all
           - sysupgrade only
           - factory only
-          - ax18 only
-          - zn_m2 only
 
 jobs:
   inject-lucky:
@@ -32,7 +30,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools curl jq
+          sudo apt-get install -y squashfs-tools curl jq file
 
       - name: Download Lucky Binary
         run: |
@@ -41,31 +39,24 @@ jobs:
           chmod 755 lucky_custom
           echo "LUCKY_SIZE=$(du -h lucky_custom | cut -f1)" >> $GITHUB_ENV
           echo "LUCKY_SHA256=$(sha256sum lucky_custom | cut -d' ' -f1)" >> $GITHUB_ENV
+          echo "✅ Lucky binary downloaded: $(file lucky_custom)"
 
       - name: Parse Release Tags
         id: parse
         run: |
-          # 将多行输入转换为数组，并显示将要处理的 tags
           echo "📋 将要处理的 Release Tags："
           echo "================================"
           
-          # 读取输入，去除空行和前后空格
           TAGS=$(echo '${{ inputs.release_tags }}' | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
           
-          # 显示每个 tag
           echo "$TAGS" | while read tag; do
-            if [ -n "$tag" ]; then
-              echo "  • $tag"
-            fi
+            [ -n "$tag" ] && echo "  • $tag"
           done
           
-          # 统计数量
           COUNT=$(echo "$TAGS" | grep -v '^$' | wc -l)
           echo "================================"
           echo "🔢 总共 $COUNT 个 Release 待处理"
-          echo ""
           
-          # 保存到输出
           echo "tags<<EOF" >> $GITHUB_OUTPUT
           echo "$TAGS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -76,23 +67,15 @@ jobs:
         run: |
           case "${{ inputs.firmware_filter }}" in
             "sysupgrade only")
-              echo "pattern=*sysupgrade*" >> $GITHUB_OUTPUT
+              echo "pattern=sysupgrade" >> $GITHUB_OUTPUT
               echo "desc=仅处理 sysupgrade 固件" >> $GITHUB_OUTPUT
               ;;
             "factory only")
-              echo "pattern=*factory*" >> $GITHUB_OUTPUT
+              echo "pattern=factory" >> $GITHUB_OUTPUT
               echo "desc=仅处理 factory 固件" >> $GITHUB_OUTPUT
               ;;
-            "ax18 only")
-              echo "pattern=*ax18*" >> $GITHUB_OUTPUT
-              echo "desc=仅处理 ax18 设备固件" >> $GITHUB_OUTPUT
-              ;;
-            "zn_m2 only")
-              echo "pattern=*zn_m2*" >> $GITHUB_OUTPUT
-              echo "desc=仅处理 zn_m2 设备固件" >> $GITHUB_OUTPUT
-              ;;
             *)
-              echo "pattern=*.bin|*.ubi" >> $GITHUB_OUTPUT
+              echo "pattern=.*" >> $GITHUB_OUTPUT
               echo "desc=处理所有固件" >> $GITHUB_OUTPUT
               ;;
           esac
@@ -103,8 +86,8 @@ jobs:
           mkdir -p output
           SUCCESS_COUNT=0
           FAIL_COUNT=0
+          TOTAL_INJECTED=0
           
-          # 读取所有 tags
           mapfile -t TAGS <<< "${{ steps.parse.outputs.tags }}"
           
           for TAG in "${TAGS[@]}"; do
@@ -115,16 +98,13 @@ jobs:
             echo "📦 开始处理 Release: $TAG"
             echo "========================================="
             
-            # 为每个 release 创建临时目录
-            WORK_DIR="temp_$(echo "$TAG" | tr '/' '_')"
+            WORK_DIR="temp_$(echo "$TAG" | tr '/' '_' | tr '.' '_')"
             mkdir -p "$WORK_DIR"
             cd "$WORK_DIR"
             
-            # 下载该 release 的固件
             echo "📥 正在下载固件..."
             RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
             
-            # 获取 release 信息
             HTTP_RESPONSE=$(curl -s -w "%{http_code}" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
               -o release_info.json "$RELEASE_URL")
             
@@ -136,18 +116,9 @@ jobs:
               continue
             fi
             
-            # 解析固件下载链接
-            FILTER_PATTERN="${{ steps.filter.outputs.pattern }}"
-            
-            # 处理不同的过滤模式
-            if [ "$FILTER_PATTERN" = "*.bin|*.ubi" ]; then
-              # 下载所有 .bin 和 .ubi 文件
-              ASSETS=$(jq -r '.assets[] | select(.name | endswith(".bin") or endswith(".ubi")) | .browser_download_url' release_info.json)
-            else
-              # 使用指定的过滤模式
-              PATTERN=$(echo "$FILTER_PATTERN" | sed 's/\*/.*/g')
-              ASSETS=$(jq -r ".assets[] | select(.name | test(\"$PATTERN\")) | .browser_download_url" release_info.json)
-            fi
+            # 下载固件
+            PATTERN="${{ steps.filter.outputs.pattern }}"
+            ASSETS=$(jq -r ".assets[] | select(.name | test(\".*($PATTERN).*\\.(bin|ubi)\$\")) | .browser_download_url" release_info.json)
             
             FIRMWARE_COUNT=0
             for URL in $ASSETS; do
@@ -170,50 +141,77 @@ jobs:
             
             echo "✅ 下载完成，共 $FIRMWARE_COUNT 个固件"
             
-            # 处理每个固件
+            # 处理每个固件 - 这里添加实际的注入逻辑
             INJECT_COUNT=0
             for FW in *.bin *.ubi; do
               [ ! -f "$FW" ] && continue
               
               echo ""
-              echo "  🔧 正在注入: $FW"
+              echo "  🔧 正在注入 lucky 到: $FW"
+              echo "  📊 文件大小: $(du -h "$FW" | cut -f1)"
               
               # 查找 squashfs 签名
               SIGNATURE=$(grep -F -a -b -o -e 'hsqs' -e 'sqsh' -e 'hsq#' "$FW" 2>/dev/null | head -1)
               
-              if [ -n "$SIGNATURE" ]; then
-                OFFSET=$(($(echo "$SIGNATURE" | awk -F: '{print $1}') - 4))
-                
-                # 提取 squashfs
-                dd if="$FW" of=root.squashfs bs=$OFFSET skip=1 2>/dev/null
-                
-                # 解压 squashfs
-                if unsquashfs -s root.squashfs >/dev/null 2>&1; then
-                  unsquashfs root.squashfs >/dev/null 2>&1
-                  
-                  if [ -d "squashfs-root" ]; then
-                    # 添加 lucky
-                    mkdir -p squashfs-root/usr/bin
-                    cp "$GITHUB_WORKSPACE/lucky_custom" squashfs-root/usr/bin/lucky
-                    chmod 755 squashfs-root/usr/bin/lucky
-                    
-                    # 重新打包
-                    mksquashfs squashfs-root new-root.squashfs -comp xz -b 262144 >/dev/null 2>&1
-                    
-                    # 创建新固件
-                    NEW_FW="lucky-$FW"
-                    dd if="$FW" of="$NEW_FW" bs=$OFFSET count=1 2>/dev/null
-                    cat new-root.squashfs >> "$NEW_FW"
-                    
-                    # 移动到最终输出目录（带 release tag 前缀）
-                    FINAL_NAME="${TAG}-${NEW_FW}"
-                    cp "$NEW_FW" "$GITHUB_WORKSPACE/output/$FINAL_NAME"
-                    
-                    echo "  ✅ 注入成功: $FINAL_NAME"
-                    INJECT_COUNT=$((INJECT_COUNT + 1))
-                  fi
-                fi
+              if [ -z "$SIGNATURE" ]; then
+                echo "  ⚠️ 未找到 squashfs 签名，跳过"
+                continue
               fi
+              
+              OFFSET=$(($(echo "$SIGNATURE" | awk -F: '{print $1}') - 4))
+              echo "  📍 squashfs 偏移量: $OFFSET"
+              
+              # 提取 squashfs
+              dd if="$FW" of=root.squashfs bs=$OFFSET skip=1 2>/dev/null
+              
+              # 解压 squashfs
+              if ! unsquashfs -s root.squashfs >/dev/null 2>&1; then
+                echo "  ⚠️ 无效的 squashfs 镜像，跳过"
+                continue
+              fi
+              
+              unsquashfs -d squashfs-root root.squashfs >/dev/null 2>&1
+              
+              if [ ! -d "squashfs-root" ]; then
+                echo "  ⚠️ 解压失败，跳过"
+                continue
+              fi
+              
+              # 创建 /usr/bin 目录（如果不存在）
+              mkdir -p squashfs-root/usr/bin
+              
+              # 复制 lucky 到固件
+              cp "$GITHUB_WORKSPACE/lucky_custom" squashfs-root/usr/bin/lucky
+              chmod 755 squashfs-root/usr/bin/lucky
+              
+              echo "  ✅ lucky 已添加到 /usr/bin/lucky"
+              
+              # 重新打包 squashfs
+              mksquashfs squashfs-root new-root.squashfs -comp xz -b 262144 >/dev/null 2>&1
+              
+              if [ ! -f "new-root.squashfs" ]; then
+                echo "  ⚠️ 重新打包失败，跳过"
+                continue
+              fi
+              
+              # 创建新固件
+              NEW_FW="lucky-$FW"
+              dd if="$FW" of="$NEW_FW" bs=$OFFSET count=1 2>/dev/null
+              cat new-root.squashfs >> "$NEW_FW"
+              
+              # 移动到最终输出目录
+              FINAL_NAME="${TAG}-${NEW_FW}"
+              cp "$NEW_FW" "$GITHUB_WORKSPACE/output/$FINAL_NAME"
+              
+              NEW_SIZE=$(du -h "$GITHUB_WORKSPACE/output/$FINAL_NAME" | cut -f1)
+              echo "  ✅ 注入成功: $FINAL_NAME (大小: $NEW_SIZE)"
+              
+              INJECT_COUNT=$((INJECT_COUNT + 1))
+              TOTAL_INJECTED=$((TOTAL_INJECTED + 1))
+              
+              # 清理临时文件
+              rm -f root.squashfs new-root.squashfs
+              rm -rf squashfs-root
             done
             
             echo "📊 Release $TAG: $INJECT_COUNT/$FIRMWARE_COUNT 固件注入成功"
@@ -229,8 +227,10 @@ jobs:
           echo "========================================="
           echo "✅ 成功处理的 Release: $SUCCESS_COUNT"
           echo "❌ 失败的 Release: $FAIL_COUNT"
+          echo "📦 总共注入固件: $TOTAL_INJECTED"
           echo "📁 输出目录: output/"
-          echo "📋 文件列表:"
+          echo ""
+          echo "📋 生成的文件:"
           ls -la output/ | while read line; do
             echo "  $line"
           done
@@ -241,6 +241,7 @@ jobs:
           name: lucky-injected-firmwares-${{ github.run_id }}
           path: output/*
           retention-days: 30
+          if-no-files-found: error
 
       - name: Create Summary
         run: |
