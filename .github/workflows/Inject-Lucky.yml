@@ -1,5 +1,4 @@
-name: Inject Lucky into Specific Releases
-
+name: Inject-Lucky
 on:
   workflow_dispatch:
     inputs:
