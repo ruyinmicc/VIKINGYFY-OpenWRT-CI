@@ -1,4 +1,5 @@
-name: Inject-lucky
+name: Inject Lucky into Specific Releases
+
 on:
   workflow_dispatch:
     inputs:
@@ -29,7 +30,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools curl jq
+          sudo apt-get install -y squashfs-tools curl jq xxd
 
       - name: Download Lucky Binary
         run: |
@@ -134,14 +135,25 @@ jobs:
               echo ""
               echo "🔧 正在注入 lucky 到: $FW"
 
-              # === 查找 squashfs 签名 (hsqs 或 sqsh) ===
-              echo "🔍 搜索 squashfs 签名 (hsqs/sqsh)..."
-              OFFSET_HEX=$(hexdump -C "$FW" | grep -E -m1 ' 68 73 71 73 | 73 71 73 68 ' | head -1 | awk '{print $1}')
-              if [ -z "$OFFSET_HEX" ]; then
+              # === 高效查找 squashfs 签名 (限制前 256MB) ===
+              echo "🔍 搜索 squashfs 签名 (hsqs/sqsh)，限前 256MB..."
+              # 读取前 256MB 并转为连续 hex 字符串
+              HEX_STREAM=$(head -c 268435456 "$FW" | xxd -p | tr -d '\n')  # 256MB = 256*1024*1024
+              
+              HSQS_POS=$(echo "$HEX_STREAM" | grep -bo '68737173' | head -1 | cut -d: -f1)
+              SQSH_POS=$(echo "$HEX_STREAM" | grep -bo '73717368' | head -1 | cut -d: -f1)
+
+              if [ -n "$HSQS_POS" ]; then
+                BYTE_OFFSET=$((HSQS_POS / 2))
+              elif [ -n "$SQSH_POS" ]; then
+                BYTE_OFFSET=$((SQSH_POS / 2))
+              else
                 echo "  ⚠️ 未找到 squashfs 签名 (hsqs/sqsh)"
                 continue
               fi
-              OFFSET=$((0x$OFFSET_HEX))
+
+              OFFSET=$BYTE_OFFSET
+              OFFSET_HEX=$(printf "%08x" $OFFSET)
               echo "  📍 找到 squashfs 偏移: $OFFSET (0x$OFFSET_HEX)"
 
               # === 提取 squashfs ===
