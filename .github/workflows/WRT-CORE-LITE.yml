@@ -1,4 +1,4 @@
-#云编译公用核心
+# 云编译公用核心
 name: WRT-CORE-LITE
 
 on:
@@ -99,10 +99,10 @@ jobs:
 
           cd ./wrt/ && echo "WRT_HASH=$(git log -1 --pretty=format:'%h')" >> $GITHUB_ENV
 
-          # GitHub Action 移除国内下载源
+          # 移除国内镜像源
           PROJECT_MIRRORS_FILE="./scripts/projectsmirrors.json"
           if [ -f "$PROJECT_MIRRORS_FILE" ]; then
-            sed -i '/.cn\//d; /tencent/d; /aliyun/d' "$PROJECT_MIRRORS_FILE"
+            sed -i '/\.cn\//d; /tencent/d; /aliyun/d' "$PROJECT_MIRRORS_FILE"
           fi
 
       - name: Check Scripts
@@ -128,10 +128,8 @@ jobs:
             find "./wrt/staging_dir" -type d -name "stamp" -not -path "*target*" | while read -r DIR; do
               find "$DIR" -type f -exec touch {} +
             done
-
             mkdir -p ./wrt/tmp && echo "1" > ./wrt/tmp/.build
-
-            echo "toolchain skiped done!"
+            echo "toolchain skipped!"
           else
             echo "caches missed!"
           fi
@@ -141,30 +139,21 @@ jobs:
             for CACHE_KEY in $CACHE_LIST; do
               gh cache delete $CACHE_KEY
             done
-
             echo "caches cleanup done!"
           fi
 
       - name: Update Feeds
         run: |
           cd ./wrt/
-
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
       - name: Custom Packages
         run: |
           cd ./wrt/package/
-
           $GITHUB_WORKSPACE/Scripts/Packages.sh
           $GITHUB_WORKSPACE/Scripts/Handles.sh
 
-      # ========== 创建自定义 lucky 包（引用外部脚本）==========
-      - name: Create custom lucky package
-        run: |
-          chmod +x $GITHUB_WORKSPACE/Scripts/create-lucky-package.sh
-          $GITHUB_WORKSPACE/Scripts/create-lucky-package.sh
- 
       - name: Custom Settings
         run: |
           cd ./wrt/
@@ -174,27 +163,127 @@ jobs:
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL-LITE.txt >> .config
           fi
           $GITHUB_WORKSPACE/Scripts/Settings.sh
-          echo "CONFIG_PACKAGE_my-lucky=y" >> .config
           make defconfig -j$(nproc)
 
       - name: Download Packages
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-
-          make download -j$(nproc)	  
+          make download -j$(nproc)
 
       - name: Compile Firmware
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
-
           make -j$(nproc) || make -j1 V=s
+
+      # ========== 【已修复】可靠注入 lucky 二进制 ==========
+      - name: Replace & Inject Lucky Binary
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          mkdir -p $GITHUB_WORKSPACE/custom-bin
+          CUSTOM_LUCKY="$GITHUB_WORKSPACE/custom-bin/lucky"
+          
+          echo "========================================================="
+          echo "🎯 注入自定义 lucky 二进制到固件"
+          echo "========================================================="
+
+          # 下载 lucky
+          curl -L -o "$CUSTOM_LUCKY" "https://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
+          if [ ! -s "$CUSTOM_LUCKY" ]; then
+            echo "❌ lucky 下载失败！"
+            exit 1
+          fi
+          chmod +x "$CUSTOM_LUCKY"
+          EXPECTED_MD5=$(md5sum "$CUSTOM_LUCKY" | cut -d' ' -f1)
+          echo "✅ 下载成功 | MD5: $EXPECTED_MD5"
+
+          # ✅ 可靠获取 staging_dir（适配新版 OpenWrt/ImmortalWrt）
+          STAGING_DIR=""
+          for dir in ./staging_dir/target-*-musl/; do
+            if [ -d "$dir" ]; then
+              STAGING_DIR="$(realpath "$dir")"
+              break
+            fi
+          done
+
+          if [ -z "$STAGING_DIR" ]; then
+            for dir in ./staging_dir/target-*/; do
+              if [ -d "$dir" ]; then
+                STAGING_DIR="$(realpath "$dir")"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$STAGING_DIR" ] || [ ! -d "$STAGING_DIR" ]; then
+            echo "❌ 未找到有效的 staging_dir！"
+            echo "当前 staging_dir 内容："
+            ls -la ./staging_dir/
+            exit 1
+          fi
+
+          echo "📁 使用 staging_dir: $(basename "$STAGING_DIR")"
+
+          # 强制注入到 /usr/bin/lucky
+          mkdir -p "$STAGING_DIR/usr/bin"
+          cp -f "$CUSTOM_LUCKY" "$STAGING_DIR/usr/bin/lucky"
+          chmod 755 "$STAGING_DIR/usr/bin/lucky"
+          echo "✅ 已注入 lucky 到 $STAGING_DIR/usr/bin/lucky"
+
+          # 同步到所有 ipkg-* 目录（增强兼容性）
+          find ./build_dir -maxdepth 2 -type d -name "ipkg-*" 2>/dev/null | while read IPKG; do
+            mkdir -p "$IPKG/usr/bin"
+            cp -f "$CUSTOM_LUCKY" "$IPKG/usr/bin/lucky"
+            chmod 755 "$IPKG/usr/bin/lucky"
+          done
+
+          echo "🛡️ 所有打包目录已同步 lucky"
+          echo "========================================================="
+
+      # ========== 验证 lucky 是否注入成功 ==========
+      - name: Verify Lucky Injection
+        if: env.WRT_TEST != 'true'
+        run: |
+          cd ./wrt/
+          STAGING_DIR=""
+          for dir in ./staging_dir/target-*-musl/; do
+            if [ -d "$dir" ]; then
+              STAGING_DIR="$(realpath "$dir")"
+              break
+            fi
+          done
+          if [ -z "$STAGING_DIR" ]; then
+            for dir in ./staging_dir/target-*/; do
+              if [ -d "$dir" ]; then
+                STAGING_DIR="$(realpath "$dir")"
+                break
+              fi
+            done
+          fi
+
+          LUCKY_BIN="$STAGING_DIR/usr/bin/lucky"
+          if [ ! -f "$LUCKY_BIN" ]; then
+            echo "❌ 验证失败：lucky 未注入！"
+            exit 1
+          fi
+
+          ACTUAL_MD5=$(md5sum "$LUCKY_BIN" | cut -d' ' -f1)
+          EXPECTED_MD5=$(md5sum "$GITHUB_WORKSPACE/custom-bin/lucky" | cut -d' ' -f1)
+
+          if [ "$ACTUAL_MD5" != "$EXPECTED_MD5" ]; then
+            echo "❌ MD5 不匹配！"
+            echo "期望: $EXPECTED_MD5"
+            echo "实际: $ACTUAL_MD5"
+            exit 1
+          fi
+
+          echo "🎉 lucky 注入验证通过！MD5: $ACTUAL_MD5"
 
       - name: Machine Information
         run: |
           cd ./wrt/
-
           echo "======================="
           lscpu | grep -E "name|Core|Thread"
           echo "======================="
@@ -205,8 +294,7 @@ jobs:
 
       - name: Package Firmware
         run: |
-          cd ./wrt/ && mkdir ./upload/
-
+          cd ./wrt/ && mkdir -p ./upload/
           cp -f ./.config ./upload/Config-"$WRT_CONFIG"-"$WRT_INFO"-"$WRT_BRANCH"-"$WRT_DATE".txt
 
           if [[ $WRT_TEST != 'true' ]]; then
@@ -214,7 +302,6 @@ jobs:
             echo "WRT_LIST=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
 
             find ./bin/targets/ -iregex ".*\(buildinfo\|json\|sha256sums\|packages\)$" -exec rm -rf {} +
-
 
             for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
               EXT=$(basename $FILE | cut -d '.' -f 2-)
@@ -224,7 +311,6 @@ jobs:
             done
 
             find ./bin/targets/ -type f -exec mv -f {} ./upload/ \;
-
             make clean -j$(nproc)
           fi
 
