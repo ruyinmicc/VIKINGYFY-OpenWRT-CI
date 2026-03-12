@@ -1,0 +1,260 @@
+name: Inject Lucky into Specific Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tags:
+        description: |
+          输入要处理的 Release Tags（一行一个）
+          例如：
+          IPQ60XX-WIFI-YES-VIKINGYFY-main-26.03.12-07.36.30
+          IPQ60XX-WIFI-NO-VIKINGYFY-main-26.03.12-07.36.30
+        required: true
+        type: string
+      firmware_filter:
+        description: '固件过滤（可选）'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - sysupgrade only
+          - factory only
+          - ax18 only
+          - zn_m2 only
+
+jobs:
+  inject-lucky:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@main
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y squashfs-tools curl jq
+
+      - name: Download Lucky Binary
+        run: |
+          LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
+          curl -L --retry 3 --progress-bar -o lucky_custom "$LUCKY_URL"
+          chmod 755 lucky_custom
+          echo "LUCKY_SIZE=$(du -h lucky_custom | cut -f1)" >> $GITHUB_ENV
+          echo "LUCKY_SHA256=$(sha256sum lucky_custom | cut -d' ' -f1)" >> $GITHUB_ENV
+
+      - name: Parse Release Tags
+      - name: Parse Release Tags
+        id: parse
+        run: |
+          # 将多行输入转换为数组，并显示将要处理的 tags
+          echo "📋 将要处理的 Release Tags："
+          echo "================================"
+          
+          # 读取输入，去除空行和前后空格
+          TAGS=$(echo '${{ inputs.release_tags }}' | grep -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          
+          # 显示每个 tag
+          echo "$TAGS" | while read tag; do
+            if [ -n "$tag" ]; then
+              echo "  • $tag"
+            fi
+          done
+          
+          # 统计数量
+          COUNT=$(echo "$TAGS" | grep -v '^$' | wc -l)
+          echo "================================"
+          echo "🔢 总共 $COUNT 个 Release 待处理"
+          echo ""
+          
+          # 保存到输出
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo "$TAGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      - name: Set Firmware Filter
+        id: filter
+        run: |
+          case "${{ inputs.firmware_filter }}" in
+            "sysupgrade only")
+              echo "pattern=*sysupgrade*" >> $GITHUB_OUTPUT
+              echo "desc=仅处理 sysupgrade 固件" >> $GITHUB_OUTPUT
+              ;;
+            "factory only")
+              echo "pattern=*factory*" >> $GITHUB_OUTPUT
+              echo "desc=仅处理 factory 固件" >> $GITHUB_OUTPUT
+              ;;
+            "ax18 only")
+              echo "pattern=*ax18*" >> $GITHUB_OUTPUT
+              echo "desc=仅处理 ax18 设备固件" >> $GITHUB_OUTPUT
+              ;;
+            "zn_m2 only")
+              echo "pattern=*zn_m2*" >> $GITHUB_OUTPUT
+              echo "desc=仅处理 zn_m2 设备固件" >> $GITHUB_OUTPUT
+              ;;
+            *)
+              echo "pattern=*.bin|*.ubi" >> $GITHUB_OUTPUT
+              echo "desc=处理所有固件" >> $GITHUB_OUTPUT
+              ;;
+          esac
+          echo "🔍 过滤规则：${{ steps.filter.outputs.desc }}"
+
+      - name: Process Each Release
+        run: |
+          mkdir -p output
+          SUCCESS_COUNT=0
+          FAIL_COUNT=0
+          
+          # 读取所有 tags
+          mapfile -t TAGS <<< "${{ steps.parse.outputs.tags }}"
+          
+          for TAG in "${TAGS[@]}"; do
+            [ -z "$TAG" ] && continue
+            
+            echo ""
+            echo "========================================="
+            echo "📦 开始处理 Release: $TAG"
+            echo "========================================="
+            
+            # 为每个 release 创建临时目录
+            WORK_DIR="temp_$(echo "$TAG" | tr '/' '_')"
+            mkdir -p "$WORK_DIR"
+            cd "$WORK_DIR"
+            
+            # 下载该 release 的固件
+            echo "📥 正在下载固件..."
+            RELEASE_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
+            
+            # 获取 release 信息
+            HTTP_RESPONSE=$(curl -s -w "%{http_code}" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -o release_info.json "$RELEASE_URL")
+            
+            if [ "$HTTP_RESPONSE" != "200" ]; then
+              echo "❌ Release 不存在或无法访问: $TAG"
+              cd ..
+              rm -rf "$WORK_DIR"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              continue
+            fi
+            
+            # 解析固件下载链接
+            FILTER_PATTERN="${{ steps.filter.outputs.pattern }}"
+            
+            # 处理不同的过滤模式
+            if [ "$FILTER_PATTERN" = "*.bin|*.ubi" ]; then
+              # 下载所有 .bin 和 .ubi 文件
+              ASSETS=$(jq -r '.assets[] | select(.name | endswith(".bin") or endswith(".ubi")) | .browser_download_url' release_info.json)
+            else
+              # 使用指定的过滤模式
+              ASSETS=$(jq -r ".assets[] | select(.name | contains(\"${FILTER_PATTERN//\*/}\")) | .browser_download_url" release_info.json)
+            fi
+            
+            FIRMWARE_COUNT=0
+            for URL in $ASSETS; do
+              FILENAME=$(basename "$URL")
+              echo "  ⏳ 下载: $FILENAME"
+              if curl -L -s -o "$FILENAME" "$URL"; then
+                echo "  ✅ 下载成功"
+                FIRMWARE_COUNT=$((FIRMWARE_COUNT + 1))
+              else
+                echo "  ❌ 下载失败"
+              fi
+            done
+            
+            if [ $FIRMWARE_COUNT -eq 0 ]; then
+              echo "⚠️ 没有找到符合条件的固件"
+              cd ..
+              rm -rf "$WORK_DIR"
+              continue
+            fi
+            
+            echo "✅ 下载完成，共 $FIRMWARE_COUNT 个固件"
+            
+            # 处理每个固件
+            INJECT_COUNT=0
+            for FW in *.bin *.ubi; do
+              [ ! -f "$FW" ] && continue
+              
+              echo ""
+              echo "  🔧 正在注入: $FW"
+              
+              # 查找 squashfs 签名
+              SIGNATURE=$(grep -F -a -b -o -e 'hsqs' -e 'sqsh' -e 'hsq#' "$FW" 2>/dev/null | head -1)
+              
+              if [ -n "$SIGNATURE" ]; then
+                OFFSET=$(($(echo "$SIGNATURE" | awk -F: '{print $1}') - 4))
+                
+                # 提取 squashfs
+                dd if="$FW" of=root.squashfs bs=$OFFSET skip=1 2>/dev/null
+                
+                # 解压 squashfs
+                if unsquashfs -s root.squashfs >/dev/null 2>&1; then
+                  unsquashfs root.squashfs >/dev/null 2>&1
+                  
+                  if [ -d "squashfs-root" ]; then
+                    # 添加 lucky
+                    mkdir -p squashfs-root/usr/bin
+                    cp "$GITHUB_WORKSPACE/lucky_custom" squashfs-root/usr/bin/lucky
+                    chmod 755 squashfs-root/usr/bin/lucky
+                    
+                    # 重新打包
+                    mksquashfs squashfs-root new-root.squashfs -comp xz -b 262144 >/dev/null 2>&1
+                    
+                    # 创建新固件
+                    NEW_FW="lucky-$FW"
+                    dd if="$FW" of="$NEW_FW" bs=$OFFSET count=1 2>/dev/null
+                    cat new-root.squashfs >> "$NEW_FW"
+                    
+                    # 移动到最终输出目录（带 release tag 前缀）
+                    FINAL_NAME="${TAG}-${NEW_FW}"
+                    cp "$NEW_FW" "$GITHUB_WORKSPACE/output/$FINAL_NAME"
+                    
+                    echo "  ✅ 注入成功: $FINAL_NAME"
+                    INJECT_COUNT=$((INJECT_COUNT + 1))
+                  fi
+                fi
+              fi
+            done
+            
+            echo "📊 Release $TAG: $INJECT_COUNT/$FIRMWARE_COUNT 固件注入成功"
+            
+            cd ..
+            rm -rf "$WORK_DIR"
+            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+          done
+          
+          echo ""
+          echo "========================================="
+          echo "📊 处理完成统计"
+          echo "========================================="
+          echo "✅ 成功处理的 Release: $SUCCESS_COUNT"
+          echo "❌ 失败的 Release: $FAIL_COUNT"
+          echo "📁 输出目录: output/"
+          echo "📋 文件列表:"
+          ls -la output/ | while read line; do
+            echo "  $line"
+          done
+
+      - name: Upload Modified Firmwares
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucky-injected-firmwares-${{ github.run_id }}
+          path: output/*
+          retention-days: 30
+
+      - name: Create Summary
+        run: |
+          echo "## 🎯 Lucky 注入结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Release | 状态 | 固件数量 |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|------|----------|" >> $GITHUB_STEP_SUMMARY
+          
+          # 这里可以添加更详细的统计
+          echo "| ${{ inputs.release_tags }} | ✅ 完成 | $(ls output/ | wc -l) |" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 生成的文件" >> $GITHUB_STEP_SUMMARY
+          ls -la output/ | while read line; do
+            echo "  - $line" >> $GITHUB_STEP_SUMMARY
+          done
