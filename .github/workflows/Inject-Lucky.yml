@@ -1,4 +1,4 @@
-name: Inject Lucky into OpenWrt Releases (Fast & Robust)
+name: Inject Lucky into OpenWrt Releases (Magic Offset Detection)
 
 on:
   workflow_dispatch:
@@ -15,7 +15,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y squashfs-tools curl jq binwalk
+          sudo apt-get install -y squashfs-tools curl jq xxd
 
       - name: Process Release and Inject Lucky
         run: |
@@ -60,46 +60,50 @@ jobs:
               echo ""
               echo "🔧 尝试注入 lucky 到: $FILENAME"
 
-              # === ⚡ 第一步：快速扫描并获取 squashfs 偏移（关键修复：|| true）===
-              echo "  ⚡ 快速扫描 Squashfs 偏移（跳过熵分析）..."
-              BINWALK_SCAN=$(
-                timeout 15 binwalk -y Squashfs --no-entropy "$FILENAME" 2>/dev/null \
-                | grep -i "squashfs" \
-                | head -1 \
-                || true   # ←←← 关键修复：防止 grep 无匹配导致脚本退出
+              # === 🎯 直接检测常见偏移的 SquashFS magic ===
+              echo "  🎯 检测常见偏移的 SquashFS magic..."
+              OFFSET_DEC=""
+              FILE_SIZE=$(stat -c%s "$FILENAME")
+
+              # IPQ60xx 常见 SquashFS 偏移（单位：字节）
+              POSSIBLE_OFFSETS=(
+                $((0x00500000))  # 5MB
+                $((0x00600000))  # 6MB
+                $((0x00700000))  # 7MB
+                $((0x00400000))  # 4MB
+                $((0x00540000))  # ~5.25MB
+                $((0x00550000))  # ~5.3125MB
+                $((0x0054b400))  # 你日志中出现的具体偏移
+                $((0x00580000))  # 5.5MB
               )
-              if [ -z "$BINWALK_SCAN" ]; then
-                echo "  ⚠️ binwalk 未检测到 Squashfs 文件系统"
+
+              for OFFSET in "${POSSIBLE_OFFSETS[@]}"; do
+                if [ "$OFFSET" -lt "$FILE_SIZE" ]; then
+                  # 读取 4 字节 magic（little-endian "sqsh" = 73 71 73 68）
+                  MAGIC=$(dd if="$FILENAME" bs=1 skip="$OFFSET" count=4 2>/dev/null | xxd -p | tr -d '\n')
+                  if [[ "$MAGIC" == "73717368" ]]; then
+                    OFFSET_DEC=$OFFSET
+                    echo "  ✅ 找到 SquashFS at offset $OFFSET_DEC (0x$(printf "%08x" $OFFSET_DEC))"
+                    break
+                  fi
+                fi
+              done
+
+              if [ -z "$OFFSET_DEC" ]; then
+                echo "  ❌ 未在常见偏移找到 SquashFS magic"
                 rm -f "$FILENAME"
                 continue
               fi
 
-              OFFSET_HEX=$(echo "$BINWALK_SCAN" | awk '{print $1}')
-              OFFSET_DEC=$((16#$OFFSET_HEX))
-              echo "  📍 检测到 squashfs 偏移: $OFFSET_DEC (0x$OFFSET_HEX)"
+              # === 💾 直接提取 squashfs 镜像 ===
+              echo "  💾 提取 squashfs 镜像..."
+              dd if="$FILENAME" of="root.squashfs" bs=1 skip="$OFFSET_DEC" 2>/dev/null
 
-              # === ⚡ 第二步：高速提取 squashfs ===
-              BINWALK_DIR="bw_fast_$$"
-              mkdir -p "$BINWALK_DIR"
-              echo "  💾 高速提取 squashfs (仅目标文件系统)..."
-              
-              if ! timeout 30 binwalk -e -y Squashfs --no-entropy --run-as=root -C "$BINWALK_DIR" "$FILENAME" >/dev/null 2>&1; then
-                echo "  ⚠️ binwalk 提取超时或失败"
-                rm -rf "$BINWALK_DIR" "$FILENAME"
+              if [ ! -s "root.squashfs" ]; then
+                echo "  ⚠️ 提取的 squashfs 为空"
+                rm -f "$FILENAME"
                 continue
               fi
-
-              # 查找提取出的 .squashfs 文件
-              SQUASH_FILE=$(find "$BINWALK_DIR" -type f -name "*.squashfs" | head -1)
-              if [ -z "$SQUASH_FILE" ] || [ ! -s "$SQUASH_FILE" ]; then
-                echo "  ⚠️ 未找到有效的 .squashfs 文件"
-                rm -rf "$BINWALK_DIR" "$FILENAME"
-                continue
-              fi
-
-              cp "$SQUASH_FILE" root.squashfs
-              rm -rf "$BINWALK_DIR"
-              echo "  ✅ 成功提取 squashfs: $(basename "$SQUASH_FILE")"
 
               # === 📦 解包 rootfs ===
               rm -rf squashfs-root
@@ -141,7 +145,7 @@ jobs:
                 echo "  ⚠️ 新镜像大了 $(($NEW_SIZE - ORIG_SIZE)) 字节！可能无法刷写！"
               fi
 
-              # === 🔗 拼接新固件（使用已缓存的 OFFSET_DEC）===
+              # === 🔗 拼接新固件 ===
               dd if="$FILENAME" of="lucky-$FILENAME" bs=1 count="$OFFSET_DEC" status=none 2>/dev/null
               cat new-root.squashfs >> "lucky-$FILENAME"
 
@@ -176,4 +180,5 @@ jobs:
             echo "✅ 成功生成 $COUNT 个注入固件，已上传为产物。"
           else
             echo "❌ 未生成任何固件，请检查日志。"
+            exit 1
           fi
