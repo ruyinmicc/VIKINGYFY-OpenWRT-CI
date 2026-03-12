@@ -159,94 +159,30 @@ jobs:
           $GITHUB_WORKSPACE/Scripts/Packages.sh
           $GITHUB_WORKSPACE/Scripts/Handles.sh
 
-      # ========== 新增：创建自定义 lucky 包 ==========
+      # ========== 创建自定义 lucky 包（引用外部脚本）==========
       - name: Create custom lucky package
         run: |
-          cd ./wrt/package/
-          
-          # 创建自定义包目录
-          PKG_DIR="my-lucky"
-          mkdir -p "$PKG_DIR"
-          
-          # 创建 Makefile
-          cat > "$PKG_DIR/Makefile" << 'EOF'
-include $(TOPDIR)/rules.mk
-
-PKG_NAME:=my-lucky
-PKG_VERSION:=20260312
-PKG_RELEASE:=1
-
-PKG_BUILD_DIR := /dev/null
-
-include $(INCLUDE_DIR)/package.mk
-
-define Package/my-lucky
-  SECTION:=utils
-  CATEGORY:=Utilities
-  TITLE:=Custom lucky binary
-  DEPENDS:=
-  PKGARCH:=all
-endef
-
-define Package/my-lucky/description
-  This package provides a pre-built lucky binary.
-  It will override the version from luci-app-lucky.
-endef
-
-define Build/Prepare
-	@true
-endef
-
-define Build/Configure
-	@true
-endef
-
-define Build/Compile
-	@true
-endef
-
-define Package/my-lucky/install
-	$(INSTALL_DIR) $(1)/usr/bin
-	$(INSTALL_BIN) ./files/usr/bin/lucky $(1)/usr/bin/
-endef
-
-$(eval $(call BuildPackage,my-lucky))
-EOF
-
-          # 下载 lucky 并放入 files 目录
-          mkdir -p "$PKG_DIR/files/usr/bin"
-          LUCKY_URL="http://alistlc.v6.army:13666/d/guset/open/lucky?sign=SiEmUmzQb_m9833knrv72EvyvQ3sEQmil0Hr-zfI92M=:0"
-          curl -L --retry 3 --progress-bar -o "$PKG_DIR/files/usr/bin/lucky" "$LUCKY_URL"
-          chmod 755 "$PKG_DIR/files/usr/bin/lucky"
-          
-          echo "✅ 自定义 lucky 包创建成功"
-          
-          cd ../../
-      # ========== 结束新增 ==========
-
+          chmod +x $GITHUB_WORKSPACE/Scripts/create-lucky-package.sh
+          $GITHUB_WORKSPACE/Scripts/create-lucky-package.sh
+ 
       - name: Custom Settings
         run: |
           cd ./wrt/
-
           if [[ "${WRT_CONFIG,,}" == *"test"* ]]; then
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt >> .config
           else
             cat $GITHUB_WORKSPACE/Config/$WRT_CONFIG.txt $GITHUB_WORKSPACE/Config/GENERAL-LITE.txt >> .config
           fi
-
           $GITHUB_WORKSPACE/Scripts/Settings.sh
-
-          # ========== 确保自定义 lucky 包被选中 ==========
           echo "CONFIG_PACKAGE_my-lucky=y" >> .config
-
-          make defconfig -j$(nproc) 
+          make defconfig -j$(nproc)
 
       - name: Download Packages
         if: env.WRT_TEST != 'true'
         run: |
           cd ./wrt/
 
-          make download -j$(nproc)
+          make download -j$(nproc)	  
 
       - name: Compile Firmware
         if: env.WRT_TEST != 'true'
@@ -278,6 +214,7 @@ EOF
             echo "WRT_LIST=$(find ./bin/targets/ -type f -name "*.manifest" -exec grep -oP '^luci-(app|theme)[^ ]*' {} \; | tr '\n' ' ')" >> $GITHUB_ENV
 
             find ./bin/targets/ -iregex ".*\(buildinfo\|json\|sha256sums\|packages\)$" -exec rm -rf {} +
+
 
             for FILE in $(find ./bin/targets/ -type f -iname "*$WRT_TARGET*") ; do
               EXT=$(basename $FILE | cut -d '.' -f 2-)
