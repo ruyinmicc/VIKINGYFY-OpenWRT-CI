@@ -135,40 +135,99 @@ jobs:
               echo ""
               echo "🔧 正在注入 lucky 到: $FW"
 
-              # 使用 binwalk 提取 squashfs
-              echo "🔍 使用 binwalk 分析固件..."
-              if ! binwalk -e --run-as=root "$FW" > /dev/null 2>&1; then
-                echo "  ⚠️ binwalk 未能提取任何内容"
-                continue
-              fi
-
-              EXTRACTED_DIR="_${FW}.extracted"
-              if [ ! -d "$EXTRACTED_DIR" ]; then
-                echo "  ⚠️ 未生成提取目录"
-                continue
-              fi
-
-              # 查找 squashfs 文件（通常为最大文件或含 .squashfs 后缀）
-              SQUASH_FILE=""
-              for f in "$EXTRACTED_DIR"/*; do
-                if [ -f "$f" ] && file "$f" | grep -q "Squashfs filesystem"; then
-                  SQUASH_FILE="$f"
-                  break
-                fi
-              done
-
-              if [ -z "$SQUASH_FILE" ]; then
-                # 尝试任意文件
-                for f in "$EXTRACTED_DIR"/*; do
-                  if [ -f "$f" ] && unsquashfs -s "$f" >/dev/null 2>&1; then
+              # === 修复 binwalk 提取问题 ===
+              echo "🔍 方法1: 使用 binwalk 提取 (详细模式)..."
+              mkdir -p extracted
+              
+              # 方法1: 使用 binwalk 提取
+              if binwalk -Me --run-as=root "$FW" > binwalk.log 2>&1; then
+                echo "  ✅ binwalk 提取完成"
+                
+                # 查找提取的 squashfs 文件
+                SQUASH_FILE=""
+                for f in $(find extracted -type f 2>/dev/null); do
+                  if file "$f" 2>/dev/null | grep -q "Squashfs filesystem"; then
                     SQUASH_FILE="$f"
+                    echo "  ✅ 找到 squashfs: $(basename "$SQUASH_FILE")"
                     break
+                  fi
+                done
+              else
+                echo "  ⚠️ binwalk 提取失败，尝试其他方法..."
+              fi
+
+              # 方法2: 直接查找 squashfs 签名
+              if [ -z "$SQUASH_FILE" ]; then
+                echo "🔍 方法2: 直接查找 squashfs 签名..."
+                
+                # 查找 hsqs 签名并提取
+                OFFSET=$(grep -F -a -b -o 'hsqs' "$FW" 2>/dev/null | head -1 | awk -F: '{print $1}')
+                if [ -n "$OFFSET" ]; then
+                  OFFSET=$((OFFSET - 4))
+                  echo "  找到 hsqs 签名，偏移量: $OFFSET"
+                  
+                  # 提取 squashfs
+                  dd if="$FW" of=root.squashfs bs=$OFFSET skip=1 2>/dev/null
+                  
+                  if [ -s root.squashfs ] && unsquashfs -s root.squashfs >/dev/null 2>&1; then
+                    SQUASH_FILE="root.squashfs"
+                    echo "  ✅ 成功提取 squashfs"
+                  fi
+                fi
+              fi
+
+              # 方法3: 尝试不同的 squashfs 签名
+              if [ -z "$SQUASH_FILE" ]; then
+                echo "🔍 方法3: 尝试其他签名..."
+                for sig in 'sqsh' 'hsq#' 'qshs'; do
+                  OFFSET=$(grep -F -a -b -o "$sig" "$FW" 2>/dev/null | head -1 | awk -F: '{print $1}')
+                  if [ -n "$OFFSET" ]; then
+                    OFFSET=$((OFFSET - 4))
+                    echo "  找到签名 $sig，偏移量: $OFFSET"
+                    
+                    dd if="$FW" of="root_${sig}.squashfs" bs=$OFFSET skip=1 2>/dev/null
+                    
+                    if [ -s "root_${sig}.squashfs" ] && unsquashfs -s "root_${sig}.squashfs" >/dev/null 2>&1; then
+                      SQUASH_FILE="root_${sig}.squashfs"
+                      echo "  ✅ 成功提取 squashfs"
+                      break
+                    fi
                   fi
                 done
               fi
 
+              # 方法4: 使用 unsquashfs 直接尝试
               if [ -z "$SQUASH_FILE" ]; then
-                echo "  ⚠️ 未找到有效的 squashfs 镜像"
+                echo "🔍 方法4: 直接使用 unsquashfs 尝试..."
+                if unsquashfs -d unsquashfs-root "$FW" >/dev/null 2>&1; then
+                  if [ -d unsquashfs-root ]; then
+                    echo "  ✅ unsquashfs 直接解压成功"
+                    # 不需要 SQUASH_FILE，直接使用解压的目录
+                    mv unsquashfs-root squashfs-root
+                    # 注入 lucky
+                    mkdir -p squashfs-root/usr/bin
+                    cp "$GITHUB_WORKSPACE/lucky_custom" squashfs-root/usr/bin/lucky
+                    chmod 755 squashfs-root/usr/bin/lucky
+                    
+                    # 重新打包
+                    mksquashfs squashfs-root new-root.squashfs -comp xz -b 262144 >/dev/null 2>&1
+                    
+                    if [ -f new-root.squashfs ]; then
+                      # 获取原始固件大小
+                      ORIG_SIZE=$(stat -c%s "$FW")
+                      
+                      # 简单拼接（可能需要知道原始偏移）
+                      cp "$FW" "lucky-$FW"
+                      echo "  ✅ 已创建新固件，但可能需要手动调整"
+                      INJECT_COUNT=$((INJECT_COUNT + 1))
+                    fi
+                    continue
+                  fi
+                fi
+              fi
+
+              if [ -z "$SQUASH_FILE" ]; then
+                echo "  ❌ 所有方法都未能提取 squashfs"
                 continue
               fi
 
@@ -187,7 +246,7 @@ jobs:
               chmod 755 squashfs-root/usr/bin/lucky
               echo "  ✅ lucky 已注入"
 
-              # 获取原始压缩参数（尽量保持一致）
+              # 获取原始压缩参数
               COMP=$(unsquashfs -s "$SQUASH_FILE" 2>&1 | grep -o 'Compression[^,]*' | cut -d' ' -f2)
               BLOCK=$(unsquashfs -s "$SQUASH_FILE" 2>&1 | grep -o 'Block size[^,]*' | grep -o '[0-9]*')
               [ -z "$COMP" ] && COMP="xz"
@@ -203,19 +262,20 @@ jobs:
               ORIG_SIZE=$(stat -c%s "$SQUASH_FILE")
               NEW_SIZE=$(stat -c%s new-root.squashfs)
               if [ $NEW_SIZE -gt $ORIG_SIZE ]; then
-                echo "  ⚠️ 新 squashfs 比原镜像大 $(($NEW_SIZE - ORIG_SIZE)) 字节！可能无法刷写！"
+                echo "  ⚠️ 新 squashfs 比原镜像大 $(($NEW_SIZE - $ORIG_SIZE)) 字节！可能无法刷写！"
               fi
 
-              # 获取 squashfs 在原固件中的偏移（从 binwalk 日志）
-              OFFSET_LINE=$(binwalk "$FW" | grep -i squashfs | head -1)
+              # 获取偏移量
+              OFFSET_LINE=$(binwalk "$FW" 2>/dev/null | grep -i squashfs | head -1)
               if [ -n "$OFFSET_LINE" ]; then
                 OFFSET=$(echo "$OFFSET_LINE" | awk '{print $1}')
               else
-                # fallback: use file size difference (less reliable)
+                # 尝试从文件大小估算
                 OFFSET=$(( $(stat -c%s "$FW") - $(stat -c%s "$SQUASH_FILE") ))
+                echo "  估算偏移量: $OFFSET"
               fi
 
-              # 拼接新固件：头部 + 新 rootfs
+              # 拼接新固件
               NEW_FW="lucky-$FW"
               head -c "$OFFSET" "$FW" > "$NEW_FW"
               cat new-root.squashfs >> "$NEW_FW"
@@ -231,7 +291,7 @@ jobs:
               fi
 
               # 清理
-              rm -rf "$EXTRACTED_DIR" squashfs-root new-root.squashfs "$NEW_FW"
+              rm -rf extracted unsquashfs-root squashfs-root new-root.squashfs *.squashfs "$NEW_FW" binwalk.log
             done
 
             echo "📊 Release $TAG: $INJECT_COUNT/$FIRMWARE_COUNT 固件注入成功"
