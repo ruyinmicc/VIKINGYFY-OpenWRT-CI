@@ -156,10 +156,20 @@ jobs:
               OFFSET_HEX=$(printf "%08x" $OFFSET)
               echo "  📍 找到 squashfs 偏移: $OFFSET (0x$OFFSET_HEX)"
 
-              # === 提取 squashfs ===
-              tail -c +$((OFFSET + 1)) "$FW" > root.squashfs
+              # === 提取 squashfs (使用 dd) ===
+              echo "  💾 使用 dd 提取 squashfs (从偏移 $OFFSET 开始)..."
+              if ! dd if="$FW" of=root.squashfs bs=1 skip="$OFFSET" status=none 2>/dev/null; then
+                echo "  ⚠️ dd 提取失败"
+                continue
+              fi
               if [ ! -s root.squashfs ]; then
                 echo "  ⚠️ 提取的 squashfs 为空"
+                continue
+              fi
+
+              # 验证有效性
+              if ! unsquashfs -s root.squashfs >/dev/null 2>&1; then
+                echo "  ⚠️ 提取内容不是有效的 squashfs"
                 continue
               fi
 
