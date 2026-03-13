@@ -101,14 +101,14 @@ CONFIG_PACKAGE_lucky=y
 CONFIG_PACKAGE_luci-app-lucky=y
 CONFIG_PACKAGE_luci-i18n-lucky-zh-cn=y
 CONFIG_PACKAGE_luci-app-easytier=y
-#CONFIG_PACKAGE_easytier=y
+CONFIG_PACKAGE_easytier=n
 # 启用 AppFilter (应用过滤)
 CONFIG_PACKAGE_kmod-oaf=y
 CONFIG_PACKAGE_open-app-filter=y
 CONFIG_PACKAGE_luci-app-oaf=y
 # 启用adguardhome
 CONFIG_PACKAGE_luci-app-adguardhome=y
-#CONFIG_PACKAGE_adguardhome=y
+CONFIG_PACKAGE_adguardhome=n
 #常用工具
 CONFIG_PACKAGE_tcpdump=y
 CONFIG_PACKAGE_tcping=y
