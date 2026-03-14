@@ -78,7 +78,8 @@ UPDATE_PACKAGE "vnt" "lmq8267/luci-app-vnt" "main"
 UPDATE_PACKAGE "lucky" "ruyinmicc/luci-app-lucky" "lite"
 UPDATE_PACKAGE "luci-app-adguardhome" "ruyinmicc/luci-app-adguardhome" "dev"
 #UPDATE_PACKAGE "luci-app-timecontrol" "TimouL/luci-app-timecontrol" "main"
-UPDATE_PACKAGE "luci-app-oaf" "destan19/OpenAppFilter" "master"
+UPDATE_PACKAGE "luci-app-oaf" "destan19/OpenAppFilter" "v6.1.7"
+UPDATE_PACKAGE "appfilter" "destan19/OpenAppFilter" "v6.1.7"
 
 
 
