@@ -119,9 +119,10 @@ CONFIG_PACKAGE_luci-i18n-lucky-zh-cn=y
 CONFIG_PACKAGE_easytier=m
 CONFIG_PACKAGE_luci-app-easytier=y
 # 启用 AppFilter (应用过滤)
-CONFIG_PACKAGE_kmod-oaf=y
+CONFIG_PACKAGE_oaf=y
 CONFIG_PACKAGE_open-app-filter=y
 CONFIG_PACKAGE_luci-app-oaf=y
+
 # 启用dns服务
 CONFIG_PACKAGE_luci-app-mosdns=y
 CONFIG_PACKAGE_luci-app-adguardhome=y
