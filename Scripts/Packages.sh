@@ -81,7 +81,7 @@ UPDATE_PACKAGE "luci-app-adguardhome" "ruyinmicc/luci-app-adguardhome" "dev"
 UPDATE_PACKAGE "luci-app-oaf" "destan19/OpenAppFilter" "v6.1.7"
 UPDATE_PACKAGE "appfilter" "destan19/OpenAppFilter" "v6.1.7"
 UPDATE_PACKAGE "open-app-filter" "destan19/OpenAppFilter" "v6.1.7"
-
+UPDATE_PACKAGE "oaf" "destan19/OpenAppFilter" "v6.1.7"
 
 #更新软件包版本
 UPDATE_VERSION() {
