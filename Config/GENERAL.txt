@@ -1,10 +1,10 @@
 #科学插件调整
-CONFIG_PACKAGE_luci-app-homeproxy=m
-CONFIG_PACKAGE_luci-app-openclash=m
-CONFIG_PACKAGE_luci-app-momo=m
-CONFIG_PACKAGE_luci-app-nikki=m
-CONFIG_PACKAGE_luci-app-passwall=m
-CONFIG_PACKAGE_luci-app-passwall2=m
+CONFIG_PACKAGE_luci-app-homeproxy=y
+CONFIG_PACKAGE_luci-app-openclash=y
+CONFIG_PACKAGE_luci-app-momo=y
+CONFIG_PACKAGE_luci-app-nikki=y
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PACKAGE_luci-app-passwall2=y
 
 #增加插件
 CONFIG_PACKAGE_luci-app-autoreboot=y
