@@ -62,11 +62,11 @@ UPDATE_PACKAGE "luci-app-tailscale" "Tokisaki-Galaxy/luci-app-tailscale-communit
 
 UPDATE_PACKAGE "ddns-go" "sirpdboy/luci-app-ddns-go" "main"
 UPDATE_PACKAGE "diskman" "lisaac/luci-app-diskman" "master"
-UPDATE_PACKAGE "easytier" "EasyTier/luci-app-easytier" "main"
+UPDATE_PACKAGE "easytier" "EasyTier/luci-app-easytier" "v2.5.0"
 UPDATE_PACKAGE "fancontrol" "rockjake/luci-app-fancontrol" "main"
 UPDATE_PACKAGE "gecoosac" "laipeng668/luci-app-gecoosac" "main"
 UPDATE_PACKAGE "mosdns" "sbwml/luci-app-mosdns" "v5" "" "v2dat"
-UPDATE_PACKAGE "netspeedtest" "sirpdboy/luci-app-netspeedtest" "master" "" "homebox speedtest"
+UPDATE_PACKAGE "netspeedtest" "muink/luci-app-netspeedtest" "master"
 UPDATE_PACKAGE "openlist2" "sbwml/luci-app-openlist2" "main"
 UPDATE_PACKAGE "partexp" "sirpdboy/luci-app-partexp" "main"
 UPDATE_PACKAGE "qbittorrent" "sbwml/luci-app-qbittorrent" "master" "" "qt6base qt6tools rblibtorrent"
@@ -74,6 +74,14 @@ UPDATE_PACKAGE "qmodem" "FUjr/QModem" "main"
 UPDATE_PACKAGE "quickfile" "sbwml/luci-app-quickfile" "main"
 UPDATE_PACKAGE "viking" "VIKINGYFY/packages" "main" "" "luci-app-timewol luci-app-wolplus"
 UPDATE_PACKAGE "vnt" "lmq8267/luci-app-vnt" "main"
+#UPDATE_PACKAGE "lucky" "ruyinmicc/luci-app-lucky" "openwrt"
+UPDATE_PACKAGE "lucky" "ruyinmicc/luci-app-lucky" "lite"
+UPDATE_PACKAGE "luci-app-adguardhome" "ruyinmicc/luci-app-adguardhome" "dev"
+#UPDATE_PACKAGE "luci-app-timecontrol" "TimouL/luci-app-timecontrol" "main"
+UPDATE_PACKAGE "luci-app-oaf" "destan19/OpenAppFilter" "v6.1.7"
+UPDATE_PACKAGE "appfilter" "destan19/OpenAppFilter" "v6.1.7"
+UPDATE_PACKAGE "open-app-filter" "destan19/OpenAppFilter" "v6.1.7"
+UPDATE_PACKAGE "oaf" "destan19/OpenAppFilter" "v6.1.7"
 
 #更新软件包版本
 UPDATE_VERSION() {
