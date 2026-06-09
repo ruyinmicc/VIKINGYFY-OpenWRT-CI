@@ -84,6 +84,7 @@ UPDATE_PACKAGE "appfilter" "destan19/OpenAppFilter" "v6.1.8"
 UPDATE_PACKAGE "open-app-filter" "destan19/OpenAppFilter" "v6.1.8"
 UPDATE_PACKAGE "oaf" "destan19/OpenAppFilter" "v6.1.8"
 UPDATE_PACKAGE  "luci-app-netdata" "sirpdboy/luci-app-netdata" "v2.0.4"
+UPDATE_PACKAGE  "luci-app-lanspeed"  "qimaoww/luci-app-lanspeed" "master"
 #更新软件包版本
 UPDATE_VERSION() {
 	local PKG_NAME=$1
