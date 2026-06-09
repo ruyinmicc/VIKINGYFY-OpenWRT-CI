@@ -162,7 +162,7 @@ CONFIG_PACKAGE_luci-app-adblock-fast=y
 CONFIG_PACKAGE_luci-app-attendedsysupgrade=y
 CONFIG_PACKAGE_luci-app-msd_lite=y
 #性能监控
-CONFIG_PACKAGE_luci-app-statistics
+CONFIG_PACKAGE_luci-app-statistics=y
 CONFIG_PACKAGE_collectd=y
 CONFIG_PACKAGE_collectd-mod-rrdtool=y
 CONFIG_PACKAGE_collectd-mod-interface=y
@@ -173,7 +173,14 @@ CONFIG_PACKAGE_collectd-mod-thermal=y
 CONFIG_PACKAGE_collectd-mod-load=y
 CONFIG_PACKAGE_collectd-mod-nss=y
 CONFIG_PACKAGE_collectd-mod-exec=y
-
+CONFIG_PACKAGE_luci-lanspeed=y
+CONFIG_DEVEL=y
+CONFIG_KERNEL_DEBUG_INFO=y
+CONFIG_KERNEL_DEBUG_INFO_BTF=y
+CONFIG_KERNEL_BPF_EVENTS=y
+CONFIG_BPF_TOOLCHAIN_HOST=y
+CONFIG_PACKAGE_kmod-nf-conntrack=y
+CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y
 
 # 3. 脚本与运行环境 (必选)
 CONFIG_PACKAGE_bash=y                
